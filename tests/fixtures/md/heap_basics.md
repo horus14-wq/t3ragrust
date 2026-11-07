@@ -1,0 +1,1 @@
+Heaps: a binary heap keeps the min at the root; sift-down restores order after pop in O(log n).

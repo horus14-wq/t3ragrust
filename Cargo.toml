@@ -1,0 +1,35 @@
+[package]
+name = "t3rag"
+version = "0.1.0"
+edition = "2021"
+description = "Rust-native retrieval over thinking traces: CLI + daemon + MCP server"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+memmap2 = "0.9"
+rayon = "1"
+rustc-hash = "2"
+dirs = "6"
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
+ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
+usearch = "2"
+tantivy = "0.24"
+parquet = { version = "55", features = ["arrow"] }
+arrow = { version = "55", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+postcard = { version = "1", features = ["alloc"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[profile.dev]
+debug = "line-tables-only"

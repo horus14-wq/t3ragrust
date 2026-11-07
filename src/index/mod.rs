@@ -1,0 +1,131 @@
+//! Dense + lexical index implementations and the `t3rag index` pipeline
+//! (t3-wkp.6, t3-wkp.7, t3-wkp.8).
+
+pub mod bm25;
+pub mod dense;
+
+use std::time::Instant;
+
+use anyhow::{bail, Context, Result};
+use tracing::info;
+
+use crate::cli::IndexArgs;
+use crate::embed::{self, Embedder};
+use crate::ingest;
+use crate::paths;
+use crate::store::{self, CorpusMeta, PassageWriter};
+
+pub use bm25::{Bm25Builder, Bm25Index};
+pub use dense::{DenseBuilder, DenseIndex};
+
+/// Passages per embedding batch (index-time parallelism knob).
+const EMBED_BATCH: usize = 16;
+/// ORT intra-op threads per session.
+const EMBED_THREADS: usize = 8;
+
+/// `t3rag index` — ingest -> pack -> embed -> usearch+tantivy -> meta.json.
+///
+/// Builds into `<name>.build-<ts>` then renames into place; a previous corpus
+/// is rotated to `<name>.replaced-<ts>` (nothing is deleted).
+pub fn run_index(args: IndexArgs) -> Result<()> {
+    let t0 = Instant::now();
+    let (iter, kind, stats) = ingest::open(&args.input, args.text_col.as_deref())?;
+    info!(?kind, input = %args.input.display(), "ingest opened");
+
+    let spec = embed::resolve_model(args.model.as_deref());
+    info!(model = %spec.repo_id, "loading embedder (first run downloads ~1-2GB)");
+    let mut emb = Embedder::load(&spec, EMBED_THREADS)?;
+    info!(dims = emb.dims(), "embedder ready");
+
+    let dir = paths::corpus_dir(&args.name)?;
+    let build_dir = dir.with_file_name(format!("{}.build-{}", args.name, now_ts()));
+    std::fs::create_dir_all(&build_dir)
+        .with_context(|| format!("create {}", build_dir.display()))?;
+
+    let mut writer = PassageWriter::create(&build_dir)?;
+    let mut lex = Bm25Builder::create(&build_dir)?;
+    let mut dense = DenseBuilder::create(&build_dir, emb.dims(), args.quantization)?;
+
+    let mut next_id = 0u64;
+    let mut batch: Vec<(u64, String)> = Vec::with_capacity(EMBED_BATCH);
+    for raw in iter {
+        let raw = raw?;
+        let Some(p) = ingest::to_passage(raw, next_id, &stats) else {
+            continue;
+        };
+        next_id += 1;
+        writer.push(&p)?;
+        lex.add(&p)?;
+        batch.push((p.id, p.text));
+        if batch.len() == EMBED_BATCH {
+            flush_batch(&mut emb, &mut dense, &mut batch)?;
+            if next_id % 1024 < EMBED_BATCH as u64 {
+                info!(docs = next_id, stats = %stats, "indexing");
+            }
+        }
+    }
+    flush_batch(&mut emb, &mut dense, &mut batch)?;
+
+    let n = writer.finish()?;
+    let nd = dense.finish()?;
+    lex.commit()?;
+    if n != nd as u64 {
+        bail!("store wrote {n} passages but dense index has {nd}");
+    }
+
+    let meta = CorpusMeta {
+        format_version: store::FORMAT_VERSION,
+        model: spec.repo_id.clone(),
+        dims: emb.dims() as u32,
+        quantization: format!("{:?}", args.quantization).to_lowercase(),
+        doc_count: n,
+    };
+    store::write_meta(&build_dir, &meta)?;
+
+    // Atomic-ish install: rotate any existing corpus aside, move build in.
+    if dir.exists() {
+        let replaced = dir.with_file_name(format!("{}.replaced-{}", args.name, now_ts()));
+        std::fs::rename(&dir, &replaced)
+            .with_context(|| format!("rotate {} -> {}", dir.display(), replaced.display()))?;
+    }
+    std::fs::rename(&build_dir, &dir)
+        .with_context(|| format!("install {} -> {}", build_dir.display(), dir.display()))?;
+
+    info!(
+        docs = n,
+        %stats,
+        elapsed = ?t0.elapsed(),
+        dir = %dir.display(),
+        "index complete"
+    );
+    println!(
+        "indexed {} passages into {} ({:.1?})",
+        n,
+        dir.display(),
+        t0.elapsed()
+    );
+    Ok(())
+}
+
+fn flush_batch(
+    emb: &mut Embedder,
+    dense: &mut DenseBuilder,
+    batch: &mut Vec<(u64, String)>,
+) -> Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+    let vecs = emb.embed_passages(&texts)?;
+    for ((id, _), v) in batch.drain(..).zip(vecs) {
+        dense.add(id, &v)?;
+    }
+    Ok(())
+}
+
+fn now_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}

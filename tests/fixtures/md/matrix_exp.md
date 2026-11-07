@@ -1,0 +1,1 @@
+Matrix exponentiation speeds linear recurrences: Fibonacci in O(log n) by squaring the transition matrix.
