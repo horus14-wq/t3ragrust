@@ -18,8 +18,12 @@ use crate::store::{self, CorpusMeta, PassageWriter};
 pub use bm25::{Bm25Builder, Bm25Index};
 pub use dense::{DenseBuilder, DenseIndex};
 
-/// Passages per embedding batch (index-time parallelism knob).
+/// Max passages per embedding batch.
 const EMBED_BATCH: usize = 16;
+/// Token budget per forward pass. The merged-KV ONNX export tiles a
+/// batch x seq^2 attention mask — unbounded batches exceed ORT's 4GB
+/// tensor limit when a long passage is present.
+const EMBED_TOKEN_BUDGET: usize = 4096;
 /// ORT intra-op threads per session.
 const EMBED_THREADS: usize = 8;
 
@@ -48,6 +52,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
 
     let mut next_id = 0u64;
     let mut batch: Vec<(u64, String)> = Vec::with_capacity(EMBED_BATCH);
+    let mut batch_tokens = 0usize;
     for raw in iter {
         let raw = raw?;
         let Some(p) = ingest::to_passage(raw, next_id, &stats) else {
@@ -56,13 +61,19 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         next_id += 1;
         writer.push(&p)?;
         lex.add(&p)?;
-        batch.push((p.id, p.text));
-        if batch.len() == EMBED_BATCH {
+        // Cheap token estimate (~3 chars/token) for the budget check.
+        let est = (p.text.len() / 3).max(1);
+        if !batch.is_empty()
+            && (batch.len() == EMBED_BATCH || batch_tokens + est > EMBED_TOKEN_BUDGET)
+        {
             flush_batch(&mut emb, &mut dense, &mut batch)?;
+            batch_tokens = 0;
             if next_id % 1024 < EMBED_BATCH as u64 {
                 info!(docs = next_id, stats = %stats, "indexing");
             }
         }
+        batch_tokens += est;
+        batch.push((p.id, p.text));
     }
     flush_batch(&mut emb, &mut dense, &mut batch)?;
 

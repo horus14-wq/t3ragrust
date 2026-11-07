@@ -3,9 +3,10 @@
 use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
-use ort::session::{builder::GraphOptimizationLevel, Session};
-use ort::value::Tensor;
+use ort::session::{builder::GraphOptimizationLevel, Session, SessionInputValue};
+use ort::value::{Tensor, TensorElementType, ValueType};
 use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
+use tracing::{info, warn};
 
 use super::{ModelSpec, MAX_EMBED_TOKENS};
 
@@ -20,6 +21,9 @@ pub struct Embedder {
     tokenizer: Tokenizer,
     dims: usize,
     instruction: String,
+    /// `past_key_values.*` input names + declared shapes on merged KV-cache
+    /// ONNX exports; fed zero-length cache tensors at run time.
+    kv_inputs: Vec<(String, Vec<i64>)>,
 }
 
 impl Embedder {
@@ -41,6 +45,28 @@ impl Embedder {
         let session = builder
             .commit_from_file(&onnx_path)
             .with_context(|| format!("load ONNX model {}", onnx_path.display()))?;
+        let kv_inputs: Vec<(String, Vec<i64>)> = session
+            .inputs()
+            .iter()
+            .filter_map(|o| {
+                let name = o.name().to_string();
+                if !name.starts_with("past_key_values.") {
+                    return None;
+                }
+                match o.dtype() {
+                    ValueType::Tensor { ty, shape, .. } => {
+                        if *ty != TensorElementType::Float32 {
+                            warn!(%name, ?ty, "kv input not f32; empty fill assumes f32");
+                        }
+                        Some((name, shape.iter().copied().collect()))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        if !kv_inputs.is_empty() {
+            info!(count = kv_inputs.len(), "merged KV export; feeding empty past_key_values");
+        }
 
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)
             .map_err(|e| anyhow::anyhow!("load tokenizer {}: {e}", tokenizer_path.display()))?;
@@ -61,6 +87,7 @@ impl Embedder {
             tokenizer,
             dims: 0,
             instruction: spec.instruction.clone(),
+            kv_inputs,
         };
         // Probe dims with a trivial forward pass (also serves as warmup).
         let probe = emb.forward_batch(&["t3rag warmup".to_string()])?;
@@ -113,13 +140,41 @@ impl Embedder {
             ids.extend(enc.get_ids().iter().map(|&t| t as i64));
             mask.extend(enc.get_attention_mask().iter().map(|&t| t as i64));
         }
+        let mut pos = Vec::with_capacity(batch * seq);
+        for enc in &encodings {
+            // Position ids = running index per sequence (right-padded batch).
+            pos.extend((0..enc.get_ids().len() as i64).collect::<Vec<_>>());
+        }
         let shape = vec![batch, seq];
         let ids_t = Tensor::from_array((shape.clone(), ids)).context("ids tensor")?;
-        let mask_t = Tensor::from_array((shape, mask)).context("mask tensor")?;
-        let outputs = self
-            .session
-            .run(ort::inputs!["input_ids" => ids_t, "attention_mask" => mask_t])
-            .context("onnx forward")?;
+        let mask_t = Tensor::from_array((shape.clone(), mask)).context("mask tensor")?;
+        let pos_t = Tensor::from_array((shape, pos)).context("position_ids tensor")?;
+        let mut feeds: Vec<(String, SessionInputValue)> = vec![
+            ("input_ids".into(), ids_t.into()),
+            ("attention_mask".into(), mask_t.into()),
+            ("position_ids".into(), pos_t.into()),
+        ];
+        for (name, dims) in &self.kv_inputs {
+            // Keep declared static dims; dynamic dims resolve positionally:
+            // dim0 -> batch, everything else -> 0 (empty cache).
+            let d: Vec<usize> = dims
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    if v >= 0 {
+                        v as usize
+                    } else if i == 0 {
+                        batch
+                    } else {
+                        0
+                    }
+                })
+                .collect();
+            let t = Tensor::<f32>::from_array((d, Vec::new()))
+                .with_context(|| format!("empty kv tensor for {name}"))?;
+            feeds.push((name.clone(), t.into()));
+        }
+        let outputs = self.session.run(feeds).context("onnx forward")?;
         let hidden = &outputs["last_hidden_state"];
         let (shape_ref, data) = hidden
             .try_extract_tensor::<f32>()

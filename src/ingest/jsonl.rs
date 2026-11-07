@@ -14,6 +14,9 @@ use super::{RawIter, RawPassage, SkipStats};
 #[derive(Deserialize)]
 struct Line {
     text: Option<String>,
+    /// `output` is the passage field used by the T3 transform pipeline
+    /// (t3data `f5_v2_t3_*.jsonl`); `text` wins when both are present.
+    output: Option<String>,
     title: Option<String>,
     question: Option<String>,
     source: Option<String>,
@@ -39,7 +42,7 @@ pub fn open(path: &Path) -> Result<(RawIter, SkipStats)> {
                     }
                     st.record_read(trimmed.len() as u64);
                     match serde_json::from_str::<Line>(trimmed) {
-                        Ok(rec) => match rec.text {
+                        Ok(rec) => match rec.text.or(rec.output) {
                             Some(text) => Some(Ok(RawPassage {
                                 text,
                                 title: rec.title,
