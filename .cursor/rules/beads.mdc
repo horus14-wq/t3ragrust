@@ -1,0 +1,66 @@
+<!-- BEGIN BEADS INTEGRATION -->
+# Beads Issue Tracking
+
+This project uses [beads_rust (br)](https://github.com/Dicklesworthstone/beads_rust) for issue tracking.
+
+`br` is non-invasive and never runs git commands. The local database is
+`.beads/beads.db`; the portable, git-tracked representation is `.beads/issues.jsonl`.
+Issue ids use the `t3-` prefix (epic children: `t3-<epic>.<n>`).
+
+## Core Rules
+
+- Track ALL work in `br` (never use markdown TODOs or comment-based task lists)
+- Use `br ready` to find available work
+- Use `br create` to track new issues/tasks/bugs
+- Read AGENTS.md for model attribution, file-reservation and handoff rules
+- Run `br --help` or `br <command> --help` for the installed command reference
+- Default to conservative git authority: report status and proposed commands unless the user, orchestrator, or repository profile explicitly authorizes commit/sync/push
+
+## Quick Reference
+
+```bash
+br ready                              # Show issues ready to work (no blockers)
+br list --status=open                 # List all open issues
+br create "title" -t task -p 2        # Create new issue
+br update <id> --claim --actor "<agent>" --model "<model>" --append-notes "worked: <agent> started"
+br update <id> --status open --assignee "" --model "<model>" --append-notes "worked: <agent> stopped — <reason>; left: <remaining work>"
+br close <id> --model "<model>" --reason "Completed; models=<chain>"
+br dep add <issue> <depends-on>       # Add dependency
+br sync --flush-only                  # Export local issue changes
+# When committing is authorized:
+git add .beads/
+git commit -m "sync beads"
+```
+
+## Workflow
+
+1. Check for ready work: `br ready`
+2. Claim an issue atomically and append attribution as shown above
+3. Reserve the files you will edit via Agent Mail (reason = bead id)
+4. Do the work
+5. Append a completed contributor note and close with `br close <id>`
+6. Handoff: report changed files, validation, issue status, and any proposed commit/sync/push commands
+
+## Issue Types
+
+- `bug` - Something broken
+- `feature` - New functionality
+- `task` - Work item (tests, docs, refactoring)
+- `epic` - Large feature with subtasks
+- `chore` - Maintenance (dependencies, tooling)
+
+## Priorities
+
+- `0` - Critical (security, data loss, broken builds)
+- `1` - High (major features, important bugs)
+- `2` - Medium (default, nice-to-have)
+- `3` - Low (polish, optimization)
+- `4` - Backlog (future ideas)
+
+## Context Loading
+
+Read AGENTS.md when context is missing.
+For detailed commands, run `br --help` or see
+[beads_rust](https://github.com/Dicklesworthstone/beads_rust).
+
+<!-- END BEADS INTEGRATION -->
