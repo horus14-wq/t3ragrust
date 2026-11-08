@@ -25,6 +25,12 @@ impl Cli {
             Command::Stats(args) => crate::doctor::run_stats(args.corpus),
             Command::Doctor => crate::doctor::run_doctor(),
             Command::Health => crate::doctor::run_health(),
+            Command::Capabilities => crate::capabilities::run_capabilities(),
+            Command::Models => crate::capabilities::run_models(),
+            Command::Export(args) => crate::capabilities::run_export(args),
+            Command::Completions { shell } => crate::capabilities::run_completions(shell),
+            Command::Man { dir } => crate::capabilities::run_man(&dir),
+            Command::Selftest => crate::capabilities::run_selftest(),
         }
     }
 }
@@ -53,6 +59,24 @@ pub enum Command {
     Doctor,
     /// <50ms pre-flight check (agents ping this).
     Health,
+    /// Machine-readable CLI surface (commands/flags/endpoints as JSON).
+    Capabilities,
+    /// Embedding + reranker model registry with cache status.
+    Models,
+    /// Export a corpus back to JSONL (round-trip).
+    Export(ExportArgs),
+    /// Generate shell completions.
+    Completions {
+        #[arg(long, value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Generate man pages into a directory.
+    Man {
+        #[arg(long)]
+        dir: PathBuf,
+    },
+    /// Clap-tree sanity check (<50ms).
+    Selftest,
 }
 
 #[derive(Args)]
@@ -274,6 +298,16 @@ pub struct StatsArgs {
     /// Corpus name (default: newest).
     #[arg(long)]
     pub corpus: Option<String>,
+}
+
+#[derive(Args)]
+pub struct ExportArgs {
+    /// Corpus name (default: newest).
+    #[arg(long)]
+    pub corpus: Option<String>,
+    /// Output JSONL path.
+    #[arg(long)]
+    pub out: PathBuf,
 }
 
 #[derive(Args)]

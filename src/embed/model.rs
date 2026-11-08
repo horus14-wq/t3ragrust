@@ -22,20 +22,20 @@ pub const ONNX_FILE_CANDIDATES: [&str; 5] = [
 /// `model.onnx` + `model.onnx_data` at the repo ROOT, no `onnx/` dir).
 pub const ONNX_ROOT_FILE_CANDIDATES: [&str; 1] = ["model.onnx"];
 
-/// One registry row: known repo → retrieval behavior.
-struct RegistryEntry {
-    repo: &'static str,
+/// One registry row: known repo → retrieval behavior (public for `t3rag models`).
+pub struct RegistryEntry {
+    pub repo: &'static str,
     /// Query-side instruction prefix ("" when the model isn't instruct-tuned).
-    instruction: &'static str,
+    pub instruction: &'static str,
     /// Passage-side prefix (e5 wants `passage: `; most want nothing).
-    passage_instruction: &'static str,
-    dims: usize,
-    onnx_files: &'static [&'static str],
+    pub passage_instruction: &'static str,
+    pub dims: usize,
+    pub onnx_files: &'static [&'static str],
 }
 
 /// Known embedding models — each verified against its HF repo layout.
 /// Unknown repos fall through to `for_hf_repo`'s generic spec.
-const REGISTRY: &[RegistryEntry] = &[
+pub const REGISTRY: &[RegistryEntry] = &[
     RegistryEntry {
         repo: "onnx-community/Qwen3-Embedding-0.6B-ONNX",
         instruction: super::DEFAULT_QUERY_INSTRUCTION,

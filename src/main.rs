@@ -1,4 +1,5 @@
 mod bench;
+mod capabilities;
 mod chunk;
 mod cli;
 mod doctor;
