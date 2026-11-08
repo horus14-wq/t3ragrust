@@ -38,7 +38,7 @@ fn tools_list() -> Value {
                     "top_k": {"type": "integer", "default": 3, "description": "passages to return"},
                     "corpus": {"type": "string", "description": "corpus name (e.g. reflect/construct/semantic); default = newest"},
                     "candidates": {"type": "integer", "default": 50, "description": "fused candidates before top_k/rerank"},
-                    "rerank": {"type": "boolean", "default": true, "description": "cross-encoder rerank of fused candidates"},
+                    "rerank": {"type": "boolean", "default": false, "description": "cross-encoder rerank of fused candidates (slow on CPU)"},
                     "exact": {"type": "boolean", "default": false, "description": "brute-force exact scan instead of ANN"},
                     "ef_search": {"type": "integer", "description": "ANN ef-search (recall-latency dial)"},
                     "rrf_k": {"type": "number", "default": 60, "description": "RRF fusion constant"},
@@ -368,7 +368,7 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
                 "client": "mcp",
                 "corpus": a["corpus"].as_str(),
                 "top_k": a["top_k"].as_u64().unwrap_or(3),
-                "rerank": a["rerank"].as_bool().unwrap_or(true),
+                "rerank": a["rerank"].as_bool().unwrap_or(false),
                 "exclude": a["exclude"],
             }))
             .context("daemon /search")?;

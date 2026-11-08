@@ -93,9 +93,12 @@ fn resolve_preset(args: &SearchArgs) -> (Option<String>, bool, usize) {
         // rerank + candidates (a real bigger-model --max awaits a quantized
         // 4B+ export or the external-data path).
         (None::<&str>, true, 100)
-    } else {
-        // --balanced is the default and behaves like "no preset".
+    } else if args.balanced {
+        // Explicit --balanced opts into the truncated parallel rerank.
         (None::<&str>, true, 50)
+    } else {
+        // No preset: rerank off (CPU cross-encoder is expensive).
+        (None::<&str>, false, 50)
     };
     (
         args.model.clone().or_else(|| model.map(String::from)),

@@ -598,7 +598,8 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     let (pc, pr) = match req.preset.as_deref() {
         Some("fast") => (20, false),
         Some("max") => (100, true),
-        _ => (50, true),
+        Some("balanced") => (50, true),
+        _ => (50, false),
     };
     let top_k = req.top_k.unwrap_or(3);
     let cand = req.candidates.unwrap_or(pc);

@@ -92,7 +92,7 @@ corpus manifests.
 | `--top-k N`, `--offset N` | Page through the ranking |
 | `--candidates N` | Per-leg candidate pool before fusion (default 50) |
 | `--preset fast\|balanced\|max` | Quality/latency bundle |
-| `--rerank` / `--no-rerank`, `--reranker NAME`, `--rerank-candidates N` | Cross-encoder stage (biggest warm cost) |
+| `--rerank` / `--no-rerank`, `--reranker NAME`, `--rerank-candidates N` | Cross-encoder stage — **off by default** (biggest warm cost). `--balanced`/`--max` presets enable it; `--no-rerank` overrides a preset |
 | `--also "phrasing"` (repeatable) | Multi-query fusion — extra phrasings fused into ONE ranking |
 | `--like ID`, `--like-text "…"` | More-like-this (dense-only; seed excluded) |
 | `--exclude ID,ID` | Subtract hits pre-top-k (iterative refinement) |
@@ -145,6 +145,16 @@ t3rag pull --repo user/ds --name c      # download + validate meta.json
 t3rag pull --repo user/ds --subdir c    # pull one subdir (local name defaults to subdir basename)
 ```
 
+Prebuilt corpora are published at
+`horus14-wq/fable5-v2-coding-t3-indexes` — four subdirectories
+(`struct`, `semantic`, `reflect`, `raw-chunked`) indexing 52K+ coding
+reasoning traces each (Qwen3-Embedding-0.6B, i8):
+
+```bash
+t3rag pull --repo horus14-wq/fable5-v2-coding-t3-indexes --subdir reflect
+t3rag search "async deadlock debugging" --corpus struct,reflect
+```
+
 There is deliberately **no `t3rag forget`** — deletion stays a user-run
 `rm -rf ~/.cache/t3rag/corpora/<name>` so no agent-reachable primitive
 can destroy indexes.
@@ -162,8 +172,10 @@ can destroy indexes.
 
 - **Cold start**: ~40–110 s (daemon spawn + model load) — pay once per
   session; the daemon's whole reason to exist.
-- **Reranker** is the warm bottleneck: ~1–2 s/query over 50 candidates on
-  CPU. `--no-rerank`, `--preset fast`, or `--rerank-candidates` control it.
+- **Reranker** is opt-in (default off) because it's the warm bottleneck:
+  ~1–2 s/query over 50 candidates on an idle CPU, and ~80 s+ measured on a
+  box at load-average 16. Enable with `--rerank` or the `--balanced`/`--max`
+  presets; `--rerank-candidates` trims the pool it scores.
 - **Indexing** is offline-scale: a 25-doc index ≈ 4 min (mostly model
   load); a 500-doc slice ≈ 38 min. Queries are the cheap part by design.
 

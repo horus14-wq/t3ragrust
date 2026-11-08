@@ -10,6 +10,11 @@ cross-encoder rerank, all local ONNX (no API keys).
 # Index a corpus (JSONL / a dir of .md/.txt / parquet)
 t3rag index --input traces.jsonl --name traces
 
+# ...or pull a prebuilt one — no indexing or GPU needed:
+t3rag pull --repo horus14-wq/fable5-v2-coding-t3-indexes --subdir struct
+#   (subdirs: struct | semantic | reflect | raw-chunked — 52K+ coding
+#    reasoning traces each, ready to query)
+
 # Query it (daemon auto-spawns on first call)
 t3rag search "PowerShell ValidateSet splatting"
 t3rag ask "how does X fail" --max-chars 600   # prompt-injection block
@@ -29,7 +34,9 @@ t3rag skill --agents devin                  # install the agent skill
   `vectors.raw.f32` raw fp32 for `--exact` recall audits.
 - **Lexical**: tantivy BM25 (`title`/`question` TEXT, `source` STRING).
 - **Fusion**: weighted RRF (`--rrf-k`, `--dense-weight`, `--bm25-weight`).
-- **Rerank**: lazy cross-encoder (`--reranker minilm|bge-base|bge-m3`).
+- **Rerank**: optional cross-encoder, **off by default** (~seconds–minute
+  per query on CPU). Enable per-query with `--rerank`, or via the
+  `--balanced`/`--max` presets; `--reranker minilm|bge-base|bge-m3`.
 - **Daemon**: per-user, `~/.cache/t3rag/daemon.json` for discovery;
   HTTP + streamable-HTTP MCP; `--token`/`--bind`/`--max-body` hardening.
 

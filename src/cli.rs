@@ -326,7 +326,7 @@ pub struct SearchArgs {
     /// (t3-w4d; daemon path).
     #[arg(long, env = "T3RAG_BATCH")]
     pub batch: Option<PathBuf>,
-    /// Enable the cross-encoder reranker (default).
+    /// Enable the cross-encoder reranker (slow on CPU).
     #[arg(long, overrides_with = "no_rerank")]
     pub rerank: bool,
     /// Disable the cross-encoder reranker.
@@ -344,7 +344,7 @@ pub struct SearchArgs {
     /// Fast preset: smallest embedder, tiny/no reranker (~50-150ms).
     #[arg(long, group = "preset")]
     pub fast: bool,
-    /// Balanced preset (default): 0.6B embedder + truncated parallel rerank.
+    /// Balanced preset: 0.6B embedder + truncated parallel rerank.
     #[arg(long, group = "preset")]
     pub balanced: bool,
     /// Max preset: 4B/8B embedder + full rerank (seconds, best precision).
