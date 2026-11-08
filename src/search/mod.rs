@@ -181,7 +181,15 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
     } else {
         None
     };
-    let mut resp = ureq::post(&format!("{base}/search"))
+    // http_status_as_error(false): non-2xx stays a readable Response so
+    // the daemon's structured error body reaches us (t3-v7m).
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .build(),
+    );
+    let mut resp = agent
+        .post(&format!("{base}/search"))
         .send_json(serde_json::json!({
             "query": args.query,
             "client": "cli",
@@ -212,6 +220,22 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
         }))
         .context("daemon POST /search")?;
     if resp.status().as_u16() != 200 {
+        // Structured errors (t3-v7m): surface code+hint, not just status.
+        let v: serde_json::Value = resp.body_mut().read_json().unwrap_or_default();
+        let e = &v["error"];
+        if e.is_object() {
+            anyhow::bail!(
+                "[{}] {}{}{}",
+                e["code"].as_str().unwrap_or("daemon_error"),
+                e["message"].as_str().unwrap_or("daemon query failed"),
+                if e["hint"].as_str().is_some() {
+                    " — "
+                } else {
+                    ""
+                },
+                e["hint"].as_str().unwrap_or(""),
+            );
+        }
         anyhow::bail!("daemon returned {}", resp.status().as_u16());
     }
     resp.body_mut().read_json().context("parse daemon response")

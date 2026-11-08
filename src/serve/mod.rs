@@ -480,13 +480,67 @@ async fn search(
     }
 }
 
-/// 400 + JSON `{"error": msg}` for search failures.
+/// 500 + structured error (t3-v7m): agents get `{error:{code,message,
+/// hint,retryable}}` instead of prose to parse. Codes are the contract —
+/// classify on the message chain; keep them stable.
 fn err_response(msg: String) -> axum::response::Response {
+    let (code, hint) = classify_error(&msg);
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({"error": msg})),
+        Json(serde_json::json!({
+            "error": {
+                "code": code,
+                "message": msg,
+                "hint": hint,
+                "retryable": code == "daemon_busy" || code == "model_loading",
+            }
+        })),
     )
         .into_response()
+}
+
+/// Map a failure's message chain to a stable error code + actionable
+/// hint (t3-v7m).
+fn classify_error(msg: &str) -> (&'static str, String) {
+    if msg.contains("not indexed") || msg.contains("no corpora found") {
+        let mut hint = String::from("list available corpora: GET /corpora or `t3rag list`");
+        if let Ok(root) = paths::corpora_root() {
+            let names: Vec<String> = std::fs::read_dir(&root)
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| e.path().join("meta.json").exists())
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !names.is_empty() {
+                hint.push_str(&format!("; indexed: {}", names.join(", ")));
+            }
+        }
+        ("corpus_not_found", hint)
+    } else if msg.contains("out of range") {
+        (
+            "passage_not_found",
+            "check passage id bounds via `t3rag stats`".into(),
+        )
+    } else if msg.contains("sparse.bin") || msg.contains("sparse feature") {
+        (
+            "sparse_unavailable",
+            "index with --sparse or build --features sparse".into(),
+        )
+    } else if msg.contains("model") && (msg.contains("download") || msg.contains("hf")) {
+        (
+            "model_unavailable",
+            "model not cached — run `t3rag selftest` or index once".into(),
+        )
+    } else if msg.contains("aborted") {
+        ("internal", "daemon-side failure — check daemon log".into())
+    } else {
+        (
+            "search_failed",
+            "inspect message; `t3rag doctor` for environment sanity".into(),
+        )
+    }
 }
 
 /// Shared query path: embed -> ANN + BM25 -> RRF -> optional rerank ->
