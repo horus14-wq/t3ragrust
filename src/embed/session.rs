@@ -26,6 +26,7 @@ pub(crate) fn providers_for(ep: Ep) -> Result<Vec<ExecutionProviderDispatch>> {
     #[allow(unused_mut)]
     let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
     // ort rc.15: error_on_failure is 0-arity (t3-x9y ep-* builds).
+    #[cfg(any(feature = "ep-cuda", feature = "ep-openvino", feature = "ep-webgpu"))]
     fn maybe_strict(d: ExecutionProviderDispatch, strict: bool) -> ExecutionProviderDispatch {
         if strict {
             d.error_on_failure()
@@ -389,9 +390,16 @@ pub(crate) fn fetch_files(spec: &ModelSpec) -> Result<(PathBuf, PathBuf)> {
         .context("model repo_id must be owner/name")?;
     let repo = client.model(owner, name);
 
+    // T3RAG_ONNX_FILE pins the export to probe first — e.g.
+    // `onnx/model_fp16.onnx` on CUDA, where int8 ops fall back to CPU.
+    let mut files = spec.onnx_files.clone();
+    if let Ok(pinned) = std::env::var("T3RAG_ONNX_FILE") {
+        files.retain(|f| *f != pinned);
+        files.insert(0, pinned);
+    }
     let mut onnx = None;
     let mut errs = Vec::new();
-    for file in &spec.onnx_files {
+    for file in &files {
         match repo.download_file().filename(file.clone()).send() {
             Ok(p) => {
                 onnx = Some((p, file.clone()));
