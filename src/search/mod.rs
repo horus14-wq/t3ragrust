@@ -216,6 +216,7 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "like": args.like,
             "like_text": args.like_text,
             "group_by": args.group_by,
+            "expand": args.expand,
             "sparse": args.sparse,
             "queries": args.also,
         }))
@@ -329,6 +330,9 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     }
     if args.group_by.is_some() {
         anyhow::bail!("--group-by requires the daemon path — drop --no-daemon");
+    }
+    if args.expand {
+        anyhow::bail!("--expand requires the daemon path — drop --no-daemon");
     }
     let corpus = resolve_corpus(args.corpus.as_deref())?;
     let meta = store::read_meta(&corpus)?;

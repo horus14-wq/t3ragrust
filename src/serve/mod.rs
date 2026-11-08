@@ -155,6 +155,9 @@ struct SearchRequest {
     /// t3-tdu: group results by `question` | `source` | `corpus` — makes
     /// the T3 multi-corpus triple structure visible.
     group_by: Option<String>,
+    /// t3-4vh: pseudo-relevance feedback — blend top-3 hit vectors into
+    /// the query and re-run the dense leg (the no-LLM recall lever).
+    expand: Option<bool>,
 }
 
 #[derive(Serialize, Clone)]
@@ -749,8 +752,55 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         .flat_map(|c| c.fused.iter().map(move |(id, s)| (c.ci, *id, *s)))
         .collect();
     ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-    let ranked_total = ranked.len();
     tracing::debug!(corpora = corpora.len(), "stage: fused");
+
+    // t3-4vh: pseudo-relevance feedback. Top-3 first-pass passages are
+    // embedded passage-side and blended into the query vector
+    // (0.7*q + 0.3*mean(passage vecs)); the expanded vector's dense leg is
+    // fused back in per corpus via RRF. `expanded_from` lands in warnings
+    // so agents see what the system thinks the query meant.
+    let mut expanded_from: Vec<u64> = Vec::new();
+    if req.expand == Some(true) && !ranked.is_empty() && !qvecs.is_empty() {
+        let seeds: Vec<String> = ranked
+            .iter()
+            .take(3)
+            .map(|(ci, id, _)| corpora[*ci].1.reader.get(*id).map(|p| p.text))
+            .collect::<Result<_>>()?;
+        expanded_from = ranked.iter().take(3).map(|(_, id, _)| *id).collect();
+        let pvs = st
+            .embedder
+            .embed_passages(&seeds.iter().map(String::as_str).collect::<Vec<_>>())?;
+        // 0.7*q + 0.3 * mean(passage vectors), re-normalized to unit length.
+        let mut eq = qvecs[0].clone();
+        for a in &mut eq {
+            *a *= 0.7;
+        }
+        let share = 0.3 / pvs.len().max(1) as f32;
+        for pv in &pvs {
+            for (a, b) in eq.iter_mut().zip(pv.iter()) {
+                *a += b * share;
+            }
+        }
+        let n = eq.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-12);
+        for a in &mut eq {
+            *a /= n;
+        }
+        for (ci, (_, corpus)) in corpora.iter().enumerate() {
+            let eqv = crate::search::truncate_unit(&eq, corpus.meta.dims as usize);
+            let ann = corpus.dense.search(&eqv, cand, req.ef_search)?;
+            per_corpus[ci].fused = rrf_fuse(
+                &[per_corpus[ci].fused.clone(), ann],
+                req.rrf_k.unwrap_or(crate::search::RRF_K),
+                &[1.0, 0.7],
+            );
+        }
+        ranked = per_corpus
+            .iter()
+            .flat_map(|c| c.fused.iter().map(move |(id, s)| (c.ci, *id, *s)))
+            .collect();
+        ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    }
+    let ranked_total = ranked.len();
 
     let mut score_kind = "rrf";
     let mut rerank_map = rustc_hash::FxHashMap::default();
@@ -939,6 +989,11 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     }
     if text_truncated {
         warnings.push("passage_text_truncated: --max-chars applied".into());
+    }
+    if !expanded_from.is_empty() {
+        warnings.push(format!(
+            "expanded_from: PRF seeded by passages {expanded_from:?}"
+        ));
     }
     let now_s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1132,6 +1187,7 @@ async fn mcp_http(
                 like: args["like"].as_u64(),
                 like_text: args["like_text"].as_str().map(String::from),
                 group_by: args["group_by"].as_str().map(String::from),
+                expand: args["expand"].as_bool(),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))

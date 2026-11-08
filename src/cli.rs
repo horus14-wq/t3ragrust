@@ -246,6 +246,10 @@ pub struct SearchArgs {
     /// lens structure visible (t3-tdu).
     #[arg(long)]
     pub group_by: Option<String>,
+    /// Pseudo-relevance feedback: blend top-3 hit vectors into the query
+    /// and re-run the dense leg (t3-4vh; daemon path).
+    #[arg(long)]
+    pub expand: bool,
     /// Enable the cross-encoder reranker (default).
     #[arg(long, overrides_with = "no_rerank")]
     pub rerank: bool,
@@ -394,6 +398,9 @@ pub struct EvalArgs {
     /// Add the learned sparse (SPLADE) leg when the corpus has sparse.bin.
     #[arg(long)]
     pub sparse: bool,
+    /// Pseudo-relevance feedback (t3-4vh) for the A/B eval gate.
+    #[arg(long)]
+    pub expand: bool,
     /// JSON output.
     #[arg(long)]
     pub json: bool,
