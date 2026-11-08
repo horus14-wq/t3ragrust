@@ -42,11 +42,52 @@ struct Corpus {
     reader: PassageReader,
 }
 
+/// Query-embedding cache (t3-wkp.16): identical queries skip the ~1-2s
+/// embed call entirely. Tiny FIFO-LRU — no dep needed at this size.
+struct QueryLru {
+    map: HashMap<String, Vec<f32>>,
+    order: std::collections::VecDeque<String>,
+    cap: usize,
+}
+
+impl QueryLru {
+    fn new(cap: usize) -> Self {
+        Self {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            cap,
+        }
+    }
+    fn get(&mut self, q: &str) -> Option<Vec<f32>> {
+        if let Some(v) = self.map.get(q) {
+            let v = v.clone();
+            self.order.retain(|k| k != q);
+            self.order.push_back(q.to_string());
+            Some(v)
+        } else {
+            None
+        }
+    }
+    fn put(&mut self, q: String, v: Vec<f32>) {
+        if self.map.contains_key(&q) {
+            self.order.retain(|k| k != &q);
+        } else if self.map.len() >= self.cap {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            }
+        }
+        self.order.push_back(q.clone());
+        self.map.insert(q, v);
+    }
+}
+
 struct DaemonState {
     corpora_root: std::path::PathBuf,
     embedder: EmbedderPool,
+    embedder_repo: String,
     reranker: Mutex<Option<RerankerPool>>,
     corpora: RwLock<HashMap<String, Arc<Corpus>>>,
+    query_cache: Mutex<QueryLru>,
     ep: crate::cli::Ep,
     threads: usize,
     started: Instant,
@@ -60,6 +101,7 @@ struct SearchRequest {
     top_k: Option<usize>,
     candidates: Option<usize>,
     rerank: Option<bool>,
+    model: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -157,8 +199,10 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let state = Arc::new(DaemonState {
         corpora_root: paths::corpora_root()?,
         embedder,
+        embedder_repo: spec.repo_id.clone(),
         reranker: Mutex::new(None),
         corpora: RwLock::new(HashMap::new()),
+        query_cache: Mutex::new(QueryLru::new(128)),
         ep: args.ep,
         threads: args.threads,
         started: Instant::now(),
@@ -269,11 +313,31 @@ async fn search(
 /// Shared query path: embed -> ANN + BM25 -> RRF -> optional rerank ->
 /// hydrate+dedupe by parent.
 fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchResponse<'a>> {
+    // A model override only works if the daemon loaded that model —
+    // otherwise the client must take the cold path.
+    if let Some(m) = &req.model {
+        if *m != st.embedder_repo {
+            anyhow::bail!(
+                "daemon runs model {}; restart with --model {m} or use --no-daemon",
+                st.embedder_repo
+            );
+        }
+    }
     let (name, corpus) = st.corpus(req.corpus.as_deref())?;
     let top_k = req.top_k.unwrap_or(3);
     let cand = req.candidates.unwrap_or(50);
 
-    let qvec = st.embedder.embed_query(&req.query)?;
+    let qvec = match st.query_cache.lock().unwrap().get(&req.query) {
+        Some(v) => v,
+        None => {
+            let v = st.embedder.embed_query(&req.query)?;
+            st.query_cache
+                .lock()
+                .unwrap()
+                .put(req.query.clone(), v.clone());
+            v
+        }
+    };
     let ann = corpus.dense.search(&qvec, cand)?;
     let bm = corpus.lex.search(&req.query, cand).unwrap_or_default();
     let mut ranked = rrf_fuse(&[ann, bm]);
@@ -350,6 +414,7 @@ async fn mcp_http(
             top_k: args["top_k"].as_u64().map(|v| v as usize),
             candidates: args["candidates"].as_u64().map(|v| v as usize),
             rerank: args["rerank"].as_bool(),
+            model: args["model"].as_str().map(String::from),
         };
         let resp = do_search(&st, &req)?;
         Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))

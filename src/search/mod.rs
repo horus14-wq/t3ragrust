@@ -42,6 +42,35 @@ pub fn rrf_fuse(legs: &[Vec<(u64, f32)>]) -> Vec<(u64, f32)> {
     v
 }
 
+/// Quality presets (t3-wkp.16): map --fast/--balanced/--max to
+/// (model override, rerank default, candidates). Explicit --model,
+/// --rerank/--no-rerank, and --candidates always win over the preset.
+fn resolve_preset(args: &SearchArgs) -> (Option<String>, bool, usize) {
+    let (model, rerank, cand) = if args.fast {
+        (None, false, 20)
+    } else if args.max {
+        (Some("onnx-community/Qwen3-Embedding-4B-ONNX"), true, 100)
+    } else {
+        // --balanced is the default and behaves like "no preset".
+        (None, true, 50)
+    };
+    (
+        args.model.clone().or_else(|| model.map(String::from)),
+        if args.rerank {
+            true
+        } else if args.no_rerank {
+            false
+        } else {
+            rerank
+        },
+        if args.candidates != 50 {
+            args.candidates
+        } else {
+            cand
+        },
+    )
+}
+
 /// `t3rag search` entry point — thin-client daemon path first (t3-wkp.13),
 /// falling back to the cold in-process path when no daemon is discoverable
 /// (or it errors), unless `--no-daemon` forces cold.
@@ -62,13 +91,15 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
 
 /// Thin client: POST the query to the resident daemon (t3-wkp.13).
 fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
+    let (model, rerank, candidates) = resolve_preset(args);
     let resp = ureq::post(&format!("{base}/search"))
         .send_json(serde_json::json!({
             "query": args.query,
             "corpus": args.corpus,
             "top_k": args.top_k,
-            "candidates": args.candidates,
-            "rerank": args.rerank && !args.no_rerank,
+            "candidates": candidates,
+            "rerank": rerank,
+            "model": model,
         }))
         .context("daemon POST /search")?;
     if resp.status() != 200 {
@@ -107,10 +138,19 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     let corpus = resolve_corpus(args.corpus.as_deref())?;
     let meta = store::read_meta(&corpus)?;
 
-    let spec = match &args.model {
+    let (preset_model, rerank, candidates) = resolve_preset(&args);
+    let spec = match preset_model.as_deref() {
         Some(m) => embed::resolve_model(Some(m)),
         None => embed::ModelSpec::for_hf_repo(&meta.model),
     };
+    if spec.repo_id != meta.model {
+        anyhow::bail!(
+            "preset/--model selects {} but corpus was indexed with {}; \
+             re-index or drop the override",
+            spec.repo_id,
+            meta.model
+        );
+    }
     let emb = EmbedderPool::load(&spec, args.threads, args.ep, args.pool)?;
     let quant = parse_quant(&meta.quantization)?;
     let dense = DenseIndex::view(&corpus, meta.dims as usize, quant)?;
@@ -119,23 +159,21 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
 
     let qvec = emb.embed_query(&args.query)?;
     let ann = if args.exact {
-        dense.exact_search(&qvec, args.candidates)?
+        dense.exact_search(&qvec, candidates)?
     } else {
-        dense.search(&qvec, args.candidates)?
+        dense.search(&qvec, candidates)?
     };
-    let bm = lex
-        .search(&args.query, args.candidates)
-        .unwrap_or_else(|e| {
-            warn!("bm25 leg failed: {e:#}");
-            Vec::new()
-        });
+    let bm = lex.search(&args.query, candidates).unwrap_or_else(|e| {
+        warn!("bm25 leg failed: {e:#}");
+        Vec::new()
+    });
     let fused = rrf_fuse(&[ann, bm]);
 
     let mut ranked: Vec<(u64, f32)> = fused;
-    if args.rerank {
+    if rerank {
         // Cross-encoder rerank of the fused candidates (t3-wkp.10): hydrate
         // candidate texts, score (query, passage) pairs, reorder by logit.
-        let cand: Vec<(u64, f32)> = ranked.into_iter().take(args.candidates).collect();
+        let cand: Vec<(u64, f32)> = ranked.into_iter().take(candidates).collect();
         let pool = crate::rerank::RerankerPool::load(
             &crate::rerank::default_spec(),
             args.threads,
