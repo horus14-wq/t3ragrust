@@ -1,6 +1,7 @@
 # Repo cargo config: synced to the rch worker with the source, so it applies to
 # every rch build and CI alike.
 #   -fuse-ld=mold: fast linker (installed on the worker and this host).
-#   -Z threads=4:  nightly parallel front end.
+# NOTE: no -Z flags here — they are nightly-only and break CI's stable
+# toolchain (as well as any stable rch build).
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-fuse-ld=mold", "-Z", "threads=4"]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
