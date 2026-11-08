@@ -327,7 +327,10 @@ mod tests {
     /// non-empty pair encodings through the same config score_pairs uses.
     #[test]
     fn minilm_dual_encodes_nonempty() {
-        let root = std::path::Path::new(env!("HOME"))
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let root = home
             .join(".cache/huggingface/hub/models--Xenova--ms-marco-MiniLM-L-6-v2");
         let Ok(e) = std::fs::read_dir(root.join("snapshots")) else {
             return; // model not cached in this env — skip
