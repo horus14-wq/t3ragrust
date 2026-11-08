@@ -45,7 +45,7 @@ impl Cli {
             Command::List => crate::doctor::run_list(),
             Command::Log(args) => crate::log::run_log(&args),
             Command::Stats(args) => crate::doctor::run_stats(args.corpus),
-            Command::Doctor => crate::doctor::run_doctor(),
+            Command::Doctor { deep } => crate::doctor::run_doctor(deep),
             Command::Verify { corpus } => {
                 print!("{}", crate::verify::verify(corpus)?.render());
                 Ok(())
@@ -90,7 +90,11 @@ pub enum Command {
     /// Deep stats for one corpus (default: newest).
     Stats(StatsArgs),
     /// Environment sanity: SIMD, EPs, HF cache, corpora, daemon.
-    Doctor,
+    Doctor {
+        /// Also run `verify` integrity checks on every corpus.
+        #[arg(long)]
+        deep: bool,
+    },
     /// Corpus integrity: meta/store/vector/BM25 consistency + staleness.
     Verify {
         /// Corpus name (default: newest).
@@ -238,6 +242,10 @@ pub struct SearchArgs {
     /// More-like-this seeded by ad-hoc text instead of a passage id.
     #[arg(long)]
     pub like_text: Option<String>,
+    /// Group results by question|source|corpus — makes the multi-corpus
+    /// lens structure visible (t3-tdu).
+    #[arg(long)]
+    pub group_by: Option<String>,
     /// Enable the cross-encoder reranker (default).
     #[arg(long, overrides_with = "no_rerank")]
     pub rerank: bool,

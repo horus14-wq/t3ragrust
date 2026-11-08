@@ -215,6 +215,7 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "exclude": args.exclude,
             "like": args.like,
             "like_text": args.like_text,
+            "group_by": args.group_by,
             "sparse": args.sparse,
             "queries": args.also,
         }))
@@ -262,6 +263,35 @@ fn print_response(v: &serde_json::Value, fmt: crate::cli::OutFmt) -> Result<()> 
             println!("</retrieved-traces>");
         }
         _ => {
+            // --group-by (t3-tdu): when the daemon grouped the hits,
+            // render per-bucket headings instead of the flat list.
+            if let Some(groups) = v.get("groups").and_then(|g| g.as_array()) {
+                for g in groups {
+                    println!("## {}", g["key"].as_str().unwrap_or("?"));
+                    if let Some(hits) = g["hits"].as_array() {
+                        for r in hits {
+                            let id = r["passage_id"].as_u64().unwrap_or(0);
+                            let score = r["score"].as_f64().unwrap_or(0.0);
+                            let title = r["title"].as_str().unwrap_or("");
+                            let corpus = r["corpus"].as_str().unwrap_or("");
+                            let text = r["text"].as_str().unwrap_or("").trim();
+                            match fmt {
+                                Toon => println!(
+                                    "  [{}] id={id} s={score:.3} {title} ~{}c",
+                                    corpus,
+                                    text.len()
+                                ),
+                                Md => println!("- [{corpus}] **{title}** ({score:.3}) — {text}"),
+                                _ => println!(
+                                    "  [{corpus}] id={id} score={score:.3} {title}\n    {text}"
+                                ),
+                            }
+                        }
+                    }
+                    println!();
+                }
+                return Ok(());
+            }
             let Some(results) = v.get("results").and_then(|r| r.as_array()) else {
                 return Ok(());
             };
@@ -296,6 +326,9 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     // Multi-query fusion (t3-css.4.4) lives in the daemon's do_search.
     if !args.also.is_empty() {
         anyhow::bail!("--also requires the daemon path — drop --no-daemon");
+    }
+    if args.group_by.is_some() {
+        anyhow::bail!("--group-by requires the daemon path — drop --no-daemon");
     }
     let corpus = resolve_corpus(args.corpus.as_deref())?;
     let meta = store::read_meta(&corpus)?;

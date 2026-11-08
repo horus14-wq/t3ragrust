@@ -152,9 +152,12 @@ struct SearchRequest {
     /// (or ad-hoc text via `like_text`); the seed id is excluded.
     like: Option<u64>,
     like_text: Option<String>,
+    /// t3-tdu: group results by `question` | `source` | `corpus` — makes
+    /// the T3 multi-corpus triple structure visible.
+    group_by: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct HitOut {
     rank: usize,
     passage_id: u64,
@@ -197,6 +200,13 @@ struct RespMeta<'a> {
     index_age_h: Option<f64>,
 }
 
+/// One `--group-by` bucket (t3-tdu): ordered by best in-group score.
+#[derive(Serialize)]
+struct GroupOut {
+    key: String,
+    hits: Vec<HitOut>,
+}
+
 #[derive(Serialize)]
 struct SearchResponse<'a> {
     query: &'a str,
@@ -204,6 +214,9 @@ struct SearchResponse<'a> {
     /// Which scale `score` uses: `rrf` (fused) or `rerank_logit`.
     score_kind: &'static str,
     results: Vec<HitOut>,
+    /// Present iff `group_by` was requested; `results` stays the flat
+    /// ranked list for compatibility.
+    groups: Option<Vec<GroupOut>>,
     stages_ms: Option<StageMs>,
     /// Honesty surface: truncation, staleness, missing legs, fallbacks.
     warnings: Vec<String>,
@@ -949,6 +962,40 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             index_age_h.unwrap_or(0.0)
         ));
     }
+    // t3-tdu: group-by over the flat results — same question across
+    // corpora collapses into one bucket ordered by its best score.
+    let groups = req.group_by.as_deref().map(|key| {
+        let key_of = |h: &HitOut| -> String {
+            match key {
+                "question" => h.question.clone().unwrap_or_else(|| "(none)".into()),
+                "source" => h.source.clone().unwrap_or_else(|| "(none)".into()),
+                "corpus" => h.corpus.clone(),
+                _ => "(all)".into(),
+            }
+        };
+        let mut order: Vec<String> = Vec::new();
+        let mut map: std::collections::HashMap<String, Vec<HitOut>> =
+            std::collections::HashMap::new();
+        for h in &results {
+            let k = key_of(h);
+            if !map.contains_key(&k) {
+                order.push(k.clone());
+            }
+            map.entry(k).or_default().push(h.clone());
+        }
+        order.sort_by(|a, b| {
+            let bs = map[b].iter().map(|h| h.score).fold(f32::MIN, f32::max);
+            let as_ = map[a].iter().map(|h| h.score).fold(f32::MIN, f32::max);
+            bs.partial_cmp(&as_).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        order
+            .into_iter()
+            .map(|k| GroupOut {
+                hits: map.remove(&k).unwrap_or_default(),
+                key: k,
+            })
+            .collect::<Vec<_>>()
+    });
     let first = corpora.first().map(|(_, c)| c);
     Ok(SearchResponse {
         query: &req.query,
@@ -959,6 +1006,7 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             .join(","),
         score_kind,
         results,
+        groups,
         stages_ms,
         warnings,
         meta: RespMeta {
@@ -1083,6 +1131,7 @@ async fn mcp_http(
                     .map(|a| a.iter().filter_map(|v| v.as_u64()).collect()),
                 like: args["like"].as_u64(),
                 like_text: args["like_text"].as_str().map(String::from),
+                group_by: args["group_by"].as_str().map(String::from),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))
