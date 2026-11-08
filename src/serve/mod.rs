@@ -182,7 +182,7 @@ impl DaemonState {
     }
 }
 
-fn newest_corpus(root: &std::path::Path) -> Result<String> {
+pub fn newest_corpus(root: &std::path::Path) -> Result<String> {
     let mut best: Option<(std::time::SystemTime, String)> = None;
     for e in std::fs::read_dir(root)
         .with_context(|| format!("read {} — no corpora indexed yet", root.display()))?

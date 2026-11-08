@@ -18,6 +18,7 @@ impl Cli {
             Command::Search(args) => crate::search::run_search(args),
             Command::Serve(args) => crate::serve::run_serve(args),
             Command::Mcp(args) => crate::mcp::run_mcp(args),
+            Command::Eval(args) => crate::eval::run_eval(args),
             Command::Skill(args) => crate::skill::run_skill(args),
         }
     }
@@ -33,6 +34,8 @@ pub enum Command {
     Serve(ServeArgs),
     /// Stdio MCP server that proxies to a running daemon (never loads models).
     Mcp(McpArgs),
+    /// Retrieval evaluation: recall@k / MRR / nDCG over a queries file.
+    Eval(EvalArgs),
     /// Emit or install a SKILL.md wrapper for agent discovery.
     Skill(SkillArgs),
 }
@@ -167,6 +170,28 @@ pub struct McpArgs {
     /// Daemon base URL override (default: discover/auto-spawn).
     #[arg(long)]
     pub daemon_url: Option<String>,
+}
+
+#[derive(Args)]
+pub struct EvalArgs {
+    /// Queries file: JSONL of {query, relevant_ids[]}.
+    #[arg(long)]
+    pub queries: PathBuf,
+    /// Corpus to eval (repeatable — multiple = side-by-side A/B).
+    #[arg(long)]
+    pub corpus: Vec<String>,
+    /// Cross-encoder rerank.
+    #[arg(long)]
+    pub rerank: bool,
+    /// Brute-force exact scan instead of ANN (recall-reference audit).
+    #[arg(long)]
+    pub exact: bool,
+    /// Fast preset (no rerank, fewer candidates).
+    #[arg(long)]
+    pub fast: bool,
+    /// JSON output.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args)]

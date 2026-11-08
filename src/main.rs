@@ -1,6 +1,7 @@
 mod chunk;
 mod cli;
 mod embed;
+mod eval;
 mod index;
 mod ingest;
 mod mcp;
