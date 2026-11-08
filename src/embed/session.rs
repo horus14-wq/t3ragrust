@@ -349,13 +349,19 @@ fn l2_normalize(v: &mut [f32]) {
 /// Fetch the ONNX model + tokenizer from HF, trying candidate export names
 /// in order. Returns local cache paths.
 pub(crate) fn fetch_files(spec: &ModelSpec) -> Result<(PathBuf, PathBuf)> {
-    let api = hf_hub::api::sync::Api::new().context("init hf-hub api")?;
-    let repo = api.model(spec.repo_id.clone());
+    // hf-hub 1.x HFClient (t3-css.4.8): Xet dedup transfers when the repo
+    // is Xet-enabled; `blocking` sync surface keeps callers unchanged.
+    let client = hf_hub::HFClientSync::new().context("init hf-hub client")?;
+    let (owner, name) = spec
+        .repo_id
+        .split_once('/')
+        .context("model repo_id must be owner/name")?;
+    let repo = client.model(owner, name);
 
     let mut onnx = None;
     let mut errs = Vec::new();
     for file in &spec.onnx_files {
-        match repo.get(file) {
+        match repo.download_file().filename(file.clone()).send() {
             Ok(p) => {
                 onnx = Some((p, file.clone()));
                 break;
@@ -373,11 +379,17 @@ pub(crate) fn fetch_files(spec: &ModelSpec) -> Result<(PathBuf, PathBuf)> {
     // External-data exports (fp32/fp16) keep weights in a `<file>_data`
     // sibling that ORT resolves adjacent to the .onnx — fetch it when the
     // repo has one (t3-css.1.1; quantized variants are self-contained).
-    if let Err(e) = repo.get(&format!("{onnx_file}_data")) {
+    if let Err(e) = repo
+        .download_file()
+        .filename(format!("{onnx_file}_data"))
+        .send()
+    {
         tracing::debug!(%e, file = %onnx_file, "no external _data sibling (self-contained export)");
     }
     let tokenizer = repo
-        .get(&spec.tokenizer_file)
+        .download_file()
+        .filename(spec.tokenizer_file.clone())
+        .send()
         .with_context(|| format!("fetch {} from {}", spec.tokenizer_file, spec.repo_id))?;
     Ok((onnx, tokenizer))
 }

@@ -18,7 +18,7 @@ rayon = "1"
 rustc-hash = "2"
 dirs = "6"
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
-hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
+hf-hub = { version = "1.0", default-features = false, features = ["blocking", "rustls-tls"] }
 ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
 usearch = "2"
 tantivy = "0.24"
