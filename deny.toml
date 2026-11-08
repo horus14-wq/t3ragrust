@@ -1,0 +1,13 @@
+# cargo-deny policy (t3-css.4.6): license allowlist only — advisory
+# (`cargo audit`) findings stay out of policy until triaged.
+[licenses]
+allow = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "MPL-2.0", "CC0-1.0", "Unicode-3.0", "MIT-0"]
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+
+[advisories]
+# Known transitive advisories (thrift, arrow-data, number_prefix, paste)
+# ride along via parquet/arrow — documented upstream issues.
+ignore = []

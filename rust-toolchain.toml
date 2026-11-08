@@ -1,0 +1,5 @@
+# Pin to stable: CI builds stable; local nightly once broke on a `-Z`
+# flag (commit 68d0880) — same toolchain everywhere (t3-css.4.6).
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
