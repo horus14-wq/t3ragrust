@@ -40,9 +40,16 @@ struct Metrics {
 /// # Errors
 /// The queries file cannot be read, or a corpus query fails.
 pub fn run_eval(args: EvalArgs) -> Result<()> {
-    let queries = read_queries(&args.queries)?;
+    if args.history {
+        return run_history(&args);
+    }
+    let queries_path = args
+        .queries
+        .as_ref()
+        .context("--queries is required (or use --history)")?;
+    let queries = read_queries(queries_path)?;
     if queries.is_empty() {
-        anyhow::bail!("no queries in {}", args.queries.display());
+        anyhow::bail!("no queries in {}", queries_path.display());
     }
     let base = crate::serve::ensure_daemon()?;
     let corpora: Vec<String> = if args.corpus.is_empty() {
@@ -191,4 +198,130 @@ fn search_ids(
         .as_array()
         .map(|rs| rs.iter().filter_map(|r| r["passage_id"].as_u64()).collect())
         .unwrap_or_default())
+}
+
+/// `eval --history` (t3-0xi): promote real usage into an eval queries
+/// file. feedback.jsonl supplies `relevant` verdicts → `relevant_ids`;
+/// the join key is exact query text. Verdicts recorded without
+/// `--query` can't join and are skipped; queries with no relevant
+/// verdict produce no line (eval needs labels — we don't fabricate).
+/// log.jsonl isn't required: a feedback query IS real usage even if it
+/// predates logging. Empty feedback → empty output, said out loud.
+fn run_history(args: &EvalArgs) -> Result<()> {
+    let root = crate::paths::cache_root()?;
+    let fb_text = std::fs::read_to_string(root.join("feedback.jsonl")).unwrap_or_default();
+    let (out, n_relevant, n_no_query, n_out) = history_lines(&fb_text);
+    match &args.out {
+        Some(p) => {
+            std::fs::write(p, &out).with_context(|| format!("write {}", p.display()))?;
+            eprintln!("wrote {n_out} queries to {}", p.display());
+        }
+        None => print!("{out}"),
+    }
+    eprintln!(
+        "eval --history: {n_relevant} relevant verdicts ({n_no_query} lacked --query) → {n_out} eval queries"
+    );
+    if n_out == 0 {
+        eprintln!(
+            "note: empty — record labels with `t3rag feedback --query \"...\" --ids 1,2 --verdict relevant`"
+        );
+    }
+    Ok(())
+}
+
+/// Pure core of `eval --history`: feedback.jsonl text → eval queries
+/// JSONL + counts (relevant verdicts, verdicts lacking --query, emitted
+/// queries). Separated for tests — no filesystem, no env.
+fn history_lines(fb_text: &str) -> (String, usize, usize, usize) {
+    use std::collections::{BTreeMap, BTreeSet};
+    // query -> (relevant ids, corpora seen)
+    let mut rel: BTreeMap<String, (BTreeSet<u64>, BTreeSet<String>)> = BTreeMap::new();
+    let (mut n_relevant, mut n_no_query) = (0usize, 0usize);
+    for line in fb_text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v["verdict"].as_str() != Some("relevant") {
+            continue;
+        }
+        n_relevant += 1;
+        let Some(q) = v["query"].as_str().filter(|q| !q.is_empty()) else {
+            n_no_query += 1;
+            continue;
+        };
+        let e = rel.entry(q.to_string()).or_default();
+        for id in v["passage_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|i| i.as_u64())
+        {
+            e.0.insert(id);
+        }
+        if let Some(c) = v["corpus"].as_str() {
+            e.1.insert(c.to_string());
+        }
+    }
+    let mut out = String::new();
+    let mut n_out = 0usize;
+    for (q, (ids, corpora)) in &rel {
+        if ids.is_empty() {
+            continue;
+        }
+        let mut line = serde_json::json!({
+            "query": q,
+            "relevant_ids": ids.iter().collect::<Vec<_>>(),
+        });
+        // Corpus provenance when unambiguous — eval ignores it today,
+        // humans/`--corpus` selection do not.
+        if corpora.len() == 1 {
+            line["corpus"] = corpora.iter().next().unwrap().clone().into();
+        }
+        out.push_str(&serde_json::to_string(&line).unwrap_or_default());
+        out.push('\n');
+        n_out += 1;
+    }
+    (out, n_relevant, n_no_query, n_out)
+}
+
+#[cfg(test)]
+mod tests {
+    /// t3-0xi AC: seeded feedback produces valid `{query, relevant_ids}`
+    /// lines; irrelevant/missing-query verdicts don't leak in.
+    #[test]
+    fn history_joins_relevant_verdicts() {
+        let fb = concat!(
+            r#"{"ts":1,"query":"rust lifetimes","passage_ids":[7,9],"verdict":"relevant","corpus":"reflect"}"#,
+            "\n",
+            r#"{"ts":2,"query":"rust lifetimes","passage_ids":[3],"verdict":"irrelevant","corpus":"reflect"}"#,
+            "\n",
+            r#"{"ts":3,"query":null,"passage_ids":[5],"verdict":"relevant","corpus":"reflect"}"#,
+            "\n",
+            r#"{"ts":4,"query":"crdt or-set","passage_ids":[11],"verdict":"relevant","corpus":"semantic"}"#,
+            "\n",
+            "not json\n",
+        );
+        let (out, n_rel, n_noq, n_out) = super::history_lines(fb);
+        assert_eq!((n_rel, n_noq, n_out), (3, 1, 2));
+        let lines: Vec<serde_json::Value> = out
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let by_q: std::collections::BTreeMap<_, _> = lines
+            .iter()
+            .map(|l| (l["query"].as_str().unwrap().to_string(), l))
+            .collect();
+        assert_eq!(
+            by_q["rust lifetimes"]["relevant_ids"],
+            serde_json::json!([7, 9])
+        );
+        assert_eq!(by_q["rust lifetimes"]["corpus"], "reflect");
+        assert_eq!(by_q["crdt or-set"]["relevant_ids"], serde_json::json!([11]));
+    }
+
+    #[test]
+    fn history_empty_feedback_is_empty() {
+        let (out, _, _, n) = super::history_lines("");
+        assert!(out.is_empty() && n == 0);
+    }
 }

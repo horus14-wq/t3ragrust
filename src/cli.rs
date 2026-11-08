@@ -412,8 +412,16 @@ pub struct McpArgs {
 #[derive(Args)]
 pub struct EvalArgs {
     /// Queries file: JSONL of {query, relevant_ids[]}.
-    #[arg(long, env = "T3RAG_QUERIES")]
-    pub queries: PathBuf,
+    /// Not required with --history (which generates one).
+    #[arg(long, env = "T3RAG_QUERIES", required_unless_present = "history")]
+    pub queries: Option<PathBuf>,
+    /// Build the queries file from log.jsonl + feedback.jsonl instead of
+    /// reading one (t3-0xi): real usage becomes the regression set.
+    #[arg(long)]
+    pub history: bool,
+    /// Output path for --history (default: stdout).
+    #[arg(long)]
+    pub out: Option<PathBuf>,
     /// Corpus to eval (repeatable — multiple = side-by-side A/B).
     #[arg(long, env = "T3RAG_CORPUS")]
     pub corpus: Vec<String>,

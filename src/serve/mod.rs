@@ -1129,6 +1129,103 @@ async fn passage(
     }
 }
 
+/// Guess the T3 transform view a query's phrasing calls for (t3-x1z).
+/// Heuristic keyword scoring — failure language → reflect, how-to →
+/// struct, conceptual → semantic; pasted dumps (newlines/fences/very
+/// long) → raw as a fallback when no keyword class fires. Returns the
+/// transform label or `None` when phrasing is neutral.
+fn intent_transform(q: &str) -> Option<&'static str> {
+    const FAIL: &[&str] = &[
+        "common mistake",
+        "mistake",
+        "what goes wrong",
+        "goes wrong",
+        "why does",
+        "why do",
+        "fail",
+        "fails",
+        "failure",
+        "bug",
+        "pitfall",
+        "gotcha",
+        "broken",
+        "incorrect",
+        "debug",
+        "crash",
+        "panic",
+        "undefined",
+        "leak",
+        "race condition",
+        "deadlock",
+        "subtle",
+        "wrong",
+        "error",
+        "exception",
+        "hang",
+        "slow",
+    ];
+    const HOW: &[&str] = &[
+        "how to",
+        "how do",
+        "how can",
+        "steps to",
+        "step by step",
+        "implement",
+        "write a",
+        "create",
+        "build",
+        "design",
+        "approach",
+        "solve",
+        "algorithm",
+        "pattern",
+        "cheatsheet",
+        "tutorial",
+        "guide",
+        "walkthrough",
+        "fix",
+    ];
+    const CONCEPT: &[&str] = &[
+        "what is",
+        "what are",
+        "explain",
+        "why is",
+        "why are",
+        "core idea",
+        "intuition",
+        "concept",
+        "mental model",
+        "tradeoff",
+        "trade-off",
+        "difference between",
+        "understand",
+        "insight",
+        "theory",
+    ];
+    // Strong dump signal wins outright: code fences, ≥3 newlines, or
+    // very long pastes are raw episodes regardless of keywords.
+    if q.contains("```") || q.len() > 800 || q.matches('\n').count() >= 3 {
+        return Some("raw");
+    }
+    let l = q.to_lowercase();
+    let score = |words: &[&str]| words.iter().filter(|w| l.contains(*w)).count();
+    let (f, h, c) = (score(FAIL), score(HOW), score(CONCEPT));
+    let best = f.max(h).max(c);
+    if best == 0 {
+        // Weak dump fallback: single newline or longish paste → raw.
+        return (q.contains('\n') || q.len() > 500).then_some("raw");
+    }
+    // Ties resolve toward the more specific signal: failure > approach >
+    // concept (a "how to fix error" still wants the pitfalls view most).
+    if f >= h && f >= c && f > 0 {
+        Some("reflect")
+    } else if h >= c {
+        Some("struct")
+    } else {
+        Some("semantic")
+    }
+}
+
 /// `GET /suggest?q=...` — corpus routing (t3-69w): embed once, cosine vs
 /// each corpus's manifest centroid where present. Transform type +
 /// manifest stats lead the output; similarity is a secondary hint (T3
@@ -1142,6 +1239,9 @@ async fn suggest(
     };
     let result = tokio::task::spawn_blocking(move || {
         let qv = st.embedder.embed_query(&q)?;
+        // t3-x1z: phrasing intent → preferred transform view; applied
+        // as a multiplicative prior on similarity (a hint, not a route).
+        let intent = intent_transform(&q);
         let mut rows = Vec::new();
         let rd = std::fs::read_dir(&st.corpora_root).context("corpora root")?;
         for e in rd.flatten() {
@@ -1150,6 +1250,8 @@ async fn suggest(
                 continue;
             };
             let m = meta.manifest.as_ref();
+            let transform = m.map(|m| m.transform.as_str()).unwrap_or("unknown");
+            let boosted = intent.is_some_and(|i| i == transform);
             let sim = m.and_then(|m| m.centroid.as_ref()).map(|c| {
                 let n = qv.len().min(c.len());
                 let (mut dot, mut na, mut nb) = (0f32, 0f32, 0f32);
@@ -1158,14 +1260,21 @@ async fn suggest(
                     na += qv[i] * qv[i];
                     nb += c[i] * c[i];
                 }
-                dot / (na.sqrt() * nb.sqrt()).max(1e-12)
+                let s = dot / (na.sqrt() * nb.sqrt()).max(1e-12);
+                // Intent prior: 1.25x for the matching transform view.
+                if boosted {
+                    s * 1.25
+                } else {
+                    s
+                }
             });
             rows.push(serde_json::json!({
                 "corpus": e.file_name().to_string_lossy(),
-                "transform": m.map(|m| m.transform.as_str()).unwrap_or("unknown"),
+                "transform": transform,
                 "docs": meta.doc_count,
                 "top_terms": m.map(|m| m.top_terms.clone()).unwrap_or_default(),
                 "similarity": sim,
+                "intent_boost": boosted,
             }));
         }
         rows.sort_by(|a, b| {
@@ -1175,8 +1284,9 @@ async fn suggest(
         });
         Ok::<_, anyhow::Error>(serde_json::json!({
             "query": q,
+            "intent": intent,
             "corpora": rows,
-            "note": "type+stats are the routing signal; similarity is a secondary hint",
+            "note": "type+stats are the routing signal; similarity is a secondary hint (intent-boosted ×1.25)",
         }))
     })
     .await;
@@ -1476,5 +1586,51 @@ fn wait_for_daemon(timeout: std::time::Duration) -> Result<String> {
             anyhow::bail!("daemon did not become ready within {timeout:?}");
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::intent_transform;
+
+    /// t3-x1z AC: intent-typed queries map to the expected transform.
+    #[test]
+    fn intent_routes_by_phrasing() {
+        assert_eq!(
+            intent_transform("what are common mistakes in rust lifetimes"),
+            Some("reflect")
+        );
+        assert_eq!(
+            intent_transform("what goes wrong with tokio spawn"),
+            Some("reflect")
+        );
+        assert_eq!(
+            intent_transform("how to implement a binary search tree"),
+            Some("struct")
+        );
+        assert_eq!(
+            intent_transform("steps to build a rate limiter"),
+            Some("struct")
+        );
+        assert_eq!(
+            intent_transform("what is the core idea behind CRDTs"),
+            Some("semantic")
+        );
+        assert_eq!(
+            intent_transform("explain the intuition for consistent hashing"),
+            Some("semantic")
+        );
+        // Pasted multi-line dump → raw (strong signal beats keywords).
+        assert_eq!(
+            intent_transform("panic! at src/main.rs:42\nthread 'main' panicked\nstack backtrace:\n  0: core::ops::function\n  1: app::main"),
+            Some("raw")
+        );
+        // Short panic mention is failure language, not a dump → reflect.
+        assert_eq!(
+            intent_transform("why does my code panic on empty input"),
+            Some("reflect")
+        );
+        // Neutral phrasing → no prior.
+        assert_eq!(intent_transform("tokio semaphore"), None);
     }
 }
