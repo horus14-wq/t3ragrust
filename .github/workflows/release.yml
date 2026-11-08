@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # CPU default per OS (t3-css.4.12)
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, flavor: cpu, features: "" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: cpu, features: "" }
+          - { os: macos-14, target: aarch64-apple-darwin, flavor: cpu, features: "" }
+          # EP flavors — ort-sys ships one EP per build, so each is a
+          # separate artifact rather than a fat binary.
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, flavor: cuda, features: "ep-cuda" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: cuda, features: "ep-cuda" }
+          - { os: macos-14, target: aarch64-apple-darwin, flavor: coreml, features: "ep-coreml" }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, flavor: openvino, features: "ep-openvino" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: openvino, features: "ep-openvino" }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}-${{ matrix.flavor }}
+
+      - name: Install mold linker (Linux only)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y mold
+
+      - name: Build
+        run: |
+          if [ -z "${{ matrix.features }}" ]; then
+            cargo build --release --locked
+          else
+            cargo build --release --locked --features "${{ matrix.features }}"
+          fi
+        shell: bash
+
+      - name: Package
+        shell: bash
+        run: |
+          set -euo pipefail
+          v=${GITHUB_REF_NAME}
+          name="t3rag-${v}-${{ matrix.flavor }}-${{ matrix.target }}"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            mkdir -p "dist/$name" && cp target/release/t3rag.exe "dist/$name/"
+            7z a "dist/$name.zip" "dist/$name"
+            (cd dist && certutil -hashfile "$name.zip" SHA256 | tail -1 > "$name.zip.sha256")
+          else
+            mkdir -p "dist/$name" && cp target/release/t3rag "dist/$name/"
+            tar -czf "dist/$name.tar.gz" -C dist "$name"
+            (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.flavor }}-${{ matrix.target }}
+          path: dist/*.{tar.gz,zip,sha256}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*
+          generate_release_notes: true
