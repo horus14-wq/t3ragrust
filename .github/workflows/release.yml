@@ -32,6 +32,11 @@ jobs:
           - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: openvino, features: "ep-openvino" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: directml, features: "ep-directml" }
     runs-on: ${{ matrix.os }}
+    env:
+      # ORT's prebuilt CoreML objects are compiled for macOS 13.4+; the
+      # default 11.0 deployment target fails the link on the ep-coreml leg
+      # (___isPlatformVersionAtLeast undefined). Ignored on non-Darwin.
+      MACOSX_DEPLOYMENT_TARGET: "13.4"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
