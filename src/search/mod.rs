@@ -29,6 +29,20 @@ pub struct Hit {
     pub source: Option<String>,
 }
 
+/// Truncate a unit vector to MRL `dims` and re-normalize (t3-css.2.4).
+/// Full-length input is returned as a clone; over-length is sliced+renormed.
+pub fn truncate_unit(v: &[f32], dims: usize) -> Vec<f32> {
+    if v.len() <= dims {
+        return v.to_vec();
+    }
+    let t = &v[..dims];
+    let norm = t.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm == 0.0 {
+        return t.to_vec();
+    }
+    t.iter().map(|x| x / norm).collect()
+}
+
 /// Fuse ranked legs by weighted reciprocal rank (t3-css.2.5):
 /// score(d) = Σ w_leg/(rrf_k + rank_i(d)). `weights[i]` scales leg i's
 /// contribution (1.0 = equal); `rrf_k` is the standard k (60 default).
@@ -214,6 +228,9 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     let reader = PassageReader::open(&corpus)?;
 
     let qvec = emb.embed_query(&args.query)?;
+    // MRL dims (t3-css.2.4): query vectors truncate to the corpus's stored
+    // dims so --dims N indexes serve without a query-side flag.
+    let qvec = truncate_unit(&qvec, meta.dims as usize);
     let ann = if args.exact {
         dense.exact_search(&qvec, candidates)?
     } else {

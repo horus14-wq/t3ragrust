@@ -49,7 +49,10 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
 
     let mut writer = PassageWriter::create(&build_dir)?;
     let mut lex = Bm25Builder::create(&build_dir)?;
-    let mut dense = DenseBuilder::create(&build_dir, emb.dims(), args.quantization)?;
+    // Matryoshka truncation (t3-css.2.4): --dims stores only the leading N
+    // dims (re-normalized); query vectors truncate the same way.
+    let store_dims = args.dims.unwrap_or_else(|| emb.dims());
+    let mut dense = DenseBuilder::create(&build_dir, store_dims, args.quantization)?;
 
     let mut next_id = 0u64;
     let mut batch: Vec<(u64, String)> = Vec::with_capacity(EMBED_BATCH);
@@ -83,7 +86,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
                 if !batch.is_empty()
                     && (batch.len() == EMBED_BATCH || batch_tokens + est > EMBED_TOKEN_BUDGET)
                 {
-                    flush_batch(&emb, &mut dense, &mut batch)?;
+                    flush_batch(&emb, &mut dense, &mut batch, store_dims)?;
                     batch_tokens = 0;
                 }
                 batch_tokens += est;
@@ -100,7 +103,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         if !batch.is_empty()
             && (batch.len() == EMBED_BATCH || batch_tokens + est > EMBED_TOKEN_BUDGET)
         {
-            flush_batch(&emb, &mut dense, &mut batch)?;
+            flush_batch(&emb, &mut dense, &mut batch, store_dims)?;
             batch_tokens = 0;
             if next_id % 1024 < EMBED_BATCH as u64 {
                 info!(docs = next_id, stats = %stats, "indexing");
@@ -109,7 +112,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         batch_tokens += est;
         batch.push((p.id, p.text));
     }
-    flush_batch(&emb, &mut dense, &mut batch)?;
+    flush_batch(&emb, &mut dense, &mut batch, store_dims)?;
     if chunked > 0 {
         info!(chunked_parents = chunked, "structural chunking applied");
     }
@@ -126,7 +129,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     let meta = CorpusMeta {
         format_version: store::FORMAT_VERSION,
         model: spec.repo_id.clone(),
-        dims: emb.dims() as u32,
+        dims: store_dims as u32,
         quantization: format!("{:?}", args.quantization).to_lowercase(),
         doc_count: n,
     };
@@ -161,6 +164,7 @@ fn flush_batch(
     emb: &EmbedderPool,
     dense: &mut DenseBuilder,
     batch: &mut Vec<(u64, String)>,
+    store_dims: usize,
 ) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
@@ -170,6 +174,7 @@ fn flush_batch(
     let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
     let vecs = emb.embed_passages(&texts)?;
     for ((id, _), v) in batch.drain(..).zip(vecs) {
+        let v = crate::search::truncate_unit(&v, store_dims);
         dense.add(id, &v)?;
     }
     Ok(())

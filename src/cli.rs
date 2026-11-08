@@ -51,6 +51,10 @@ pub struct IndexArgs {
     /// Corpus name (artifact dir under the cache root).
     #[arg(long)]
     pub name: String,
+    /// Matryoshka dims: truncate vectors to N (L2-renormed; model must be
+    /// MRL-capable — Qwen3 truncates cleanly to 32..1024).
+    #[arg(long)]
+    pub dims: Option<usize>,
     /// Text column for parquet input (auto-detect: text/content/passage).
     #[arg(long)]
     pub text_col: Option<String>,

@@ -407,6 +407,8 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     };
     let embed_ms = t_embed.elapsed().as_secs_f64() * 1000.0;
     tracing::debug!("stage: embed done");
+    // MRL dims (t3-css.2.4): match the corpus's stored dims.
+    let qvec = crate::search::truncate_unit(&qvec, corpus.meta.dims as usize);
     // --exact: brute-force scan over raw vectors (the recall oracle) instead
     // of the ANN — forwarded through the daemon since t3-css.1.4.
     let t_dense = Instant::now();
