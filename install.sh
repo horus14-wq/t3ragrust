@@ -38,6 +38,9 @@ curl -fsSL "$url.sha256" -o "$tmp/pkg.sha256"
   || { echo "checksum mismatch" >&2; exit 1; }
 tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
 mkdir -p "$DIR"
-install -m 0755 "$tmp/$name/t3rag" "$DIR/t3rag"
+# Install everything in the package dir — EP flavors also ship the
+# provider libs (libonnxruntime_providers_*.so / *.dll) the binary
+# dlopens from its own directory ($ORIGIN rpath).
+install -m 0755 "$tmp/$name/"* "$DIR/"
 echo "installed $DIR/t3rag ($EP, $target)"
 "$DIR/t3rag" doctor || true

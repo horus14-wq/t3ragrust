@@ -13,6 +13,8 @@ cross-encoder rerank, all local ONNX (no API keys).
 curl -fsSL https://raw.githubusercontent.com/horus14-wq/t3ragrust/main/install.sh | bash
 # T3RAG_EP=cuda|coreml|openvino|directml for flavored builds;
 # T3RAG_VERSION / T3RAG_DIR to pin or relocate.
+# EP packages ship their provider libs alongside the binary
+# ($ORIGIN rpath). cuda needs NVIDIA driver + CUDA 13 runtime + cuDNN 9.
 ```
 
 Then:
