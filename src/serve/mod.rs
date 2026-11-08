@@ -176,6 +176,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/health", get(health))
         .route("/corpora", get(list_corpora))
         .route("/search", post(search))
+        .route("/mcp", post(mcp_http))
         .with_state(state.clone());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
@@ -255,7 +256,7 @@ async fn search(
     Json(req): Json<SearchRequest>,
 ) -> impl IntoResponse {
     st.touch();
-    match do_search(&st, &req).await {
+    match do_search(&st, &req) {
         Ok(resp) => Json(resp).into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -267,7 +268,7 @@ async fn search(
 
 /// Shared query path: embed -> ANN + BM25 -> RRF -> optional rerank ->
 /// hydrate+dedupe by parent.
-async fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchResponse<'a>> {
+fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchResponse<'a>> {
     let (name, corpus) = st.corpus(req.corpus.as_deref())?;
     let top_k = req.top_k.unwrap_or(3);
     let cand = req.candidates.unwrap_or(50);
@@ -333,6 +334,30 @@ async fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<Se
         corpus: name,
         results,
     })
+}
+
+/// `POST /mcp` — streamable-HTTP MCP endpoint (single-shot JSON-RPC;
+/// session/batch semantics deferred to rmcp if we ever need them).
+async fn mcp_http(
+    State(st): State<Arc<DaemonState>>,
+    Json(msg): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    st.touch();
+    let exec = |args: &serde_json::Value| -> Result<serde_json::Value> {
+        let req = SearchRequest {
+            query: args["query"].as_str().unwrap_or("").to_string(),
+            corpus: args["corpus"].as_str().map(String::from),
+            top_k: args["top_k"].as_u64().map(|v| v as usize),
+            candidates: args["candidates"].as_u64().map(|v| v as usize),
+            rerank: args["rerank"].as_bool(),
+        };
+        let resp = do_search(&st, &req)?;
+        Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))
+    };
+    match crate::mcp::handle_rpc(&msg, &exec) {
+        Some(resp) => Json(resp).into_response(),
+        None => StatusCode::ACCEPTED.into_response(),
+    }
 }
 
 fn write_daemon_info(port: u16) -> Result<()> {
