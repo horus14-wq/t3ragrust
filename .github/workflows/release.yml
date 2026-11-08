@@ -24,6 +24,7 @@ jobs:
           - { os: macos-14, target: aarch64-apple-darwin, flavor: coreml, features: "ep-coreml" }
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, flavor: openvino, features: "ep-openvino" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: openvino, features: "ep-openvino" }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: directml, features: "ep-directml" }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

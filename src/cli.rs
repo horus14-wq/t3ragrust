@@ -586,4 +586,6 @@ pub enum Ep {
     Webgpu,
     /// Apple CoreML EP (macOS/arm64; needs --features ep-coreml).
     Coreml,
+    /// DirectML EP (Windows/AMD/NVIDIA/Intel GPUs; needs --features ep-directml).
+    Directml,
 }

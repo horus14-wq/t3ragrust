@@ -42,6 +42,10 @@ pub(crate) fn providers_for(ep: Ep) -> Result<Vec<ExecutionProviderDispatch>> {
                 .build()
                 .error_on_failure(strict),
         );
+        // DirectML's builder has no error_on_failure(strict) variant —
+        // registration failures are always non-fatal (falls back to CPU).
+        #[cfg(feature = "ep-directml")]
+        eps.push(ort::ep::DirectML::default().build().error_on_failure());
         #[cfg(feature = "ep-webgpu")]
         eps.push(ort::ep::WebGPU::default().build().error_on_failure(strict));
     };
@@ -71,6 +75,13 @@ pub(crate) fn providers_for(ep: Ep) -> Result<Vec<ExecutionProviderDispatch>> {
             eps.push(ort::ep::CoreML::default().build().error_on_failure(true));
             #[cfg(not(feature = "ep-coreml"))]
             return Err(not_built("coreml"));
+        }
+        Ep::Directml => {
+            #[cfg(feature = "ep-directml")]
+            // No strict variant for DirectML — see the push_all comment.
+            eps.push(ort::ep::DirectML::default().build().error_on_failure());
+            #[cfg(not(feature = "ep-directml"))]
+            return Err(not_built("directml"));
         }
         Ep::Webgpu => {
             #[cfg(feature = "ep-webgpu")]
