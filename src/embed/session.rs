@@ -135,7 +135,7 @@ pub struct Embedder {
     declared_inputs: std::collections::HashSet<String>,
     /// `past_key_values.*` input names + declared shapes on merged KV-cache
     /// ONNX exports; fed zero-length cache tensors at run time.
-    kv_inputs: Vec<(String, Vec<i64>)>,
+    kv_inputs: Vec<(String, Vec<i64>, TensorElementType)>,
 }
 
 impl Embedder {
@@ -176,7 +176,7 @@ impl Embedder {
             .iter()
             .map(|o| o.name().to_string())
             .collect();
-        let kv_inputs: Vec<(String, Vec<i64>)> = session
+        let kv_inputs: Vec<(String, Vec<i64>, TensorElementType)> = session
             .inputs()
             .iter()
             .filter_map(|o| {
@@ -186,10 +186,10 @@ impl Embedder {
                 }
                 match o.dtype() {
                     ValueType::Tensor { ty, shape, .. } => {
-                        if *ty != TensorElementType::Float32 {
-                            warn!(%name, ?ty, "kv input not f32; empty fill assumes f32");
+                        if !matches!(ty, TensorElementType::Float32 | TensorElementType::Float16) {
+                            warn!(%name, ?ty, "kv input not f32/f16; empty fill assumes f32");
                         }
-                        Some((name, shape.iter().copied().collect()))
+                        Some((name, shape.iter().copied().collect(), *ty))
                     }
                     _ => None,
                 }
@@ -311,7 +311,7 @@ impl Embedder {
                 Tensor::from_array((vec![batch, seq], zeros)).context("token_type_ids tensor")?;
             feeds.push(("token_type_ids".into(), tt.into()));
         }
-        for (name, dims) in &self.kv_inputs {
+        for (name, dims, ty) in &self.kv_inputs {
             // Keep declared static dims; dynamic dims resolve positionally:
             // dim0 -> batch, everything else -> 0 (empty cache).
             let d: Vec<usize> = dims
@@ -327,15 +327,36 @@ impl Embedder {
                     }
                 })
                 .collect();
-            let t = Tensor::<f32>::from_array((d, Vec::new()))
-                .with_context(|| format!("empty kv tensor for {name}"))?;
-            feeds.push((name.clone(), t.into()));
+            if *ty == TensorElementType::Float16 {
+                let t = Tensor::<half::f16>::from_array((d, Vec::new()))
+                    .with_context(|| format!("empty kv tensor for {name}"))?;
+                feeds.push((name.clone(), t.into()));
+            } else {
+                let t = Tensor::<f32>::from_array((d, Vec::new()))
+                    .with_context(|| format!("empty kv tensor for {name}"))?;
+                feeds.push((name.clone(), t.into()));
+            }
         }
         let outputs = self.session.run(feeds).context("onnx forward")?;
         let hidden = &outputs["last_hidden_state"];
-        let (shape_ref, data) = hidden
-            .try_extract_tensor::<f32>()
-            .context("extract last_hidden_state")?;
+        let (shape_ref, data): (&ort::value::Shape, Vec<f32>) = match hidden.dtype() {
+            ValueType::Tensor {
+                ty: TensorElementType::Float16,
+                ..
+            } => {
+                let (shape, d16) = hidden
+                    .try_extract_tensor::<half::f16>()
+                    .context("extract last_hidden_state (f16)")?;
+                (shape, d16.iter().map(|v| f32::from(*v)).collect())
+            }
+            _ => {
+                let (shape, d32) = hidden
+                    .try_extract_tensor::<f32>()
+                    .context("extract last_hidden_state")?;
+                (shape, d32.to_vec())
+            }
+        };
+        let data = &data[..];
         let dims = *shape_ref
             .last()
             .context("last_hidden_state has no trailing dim")? as usize;

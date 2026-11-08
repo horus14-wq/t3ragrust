@@ -3243,6 +3243,7 @@ version = "2.0.0-rc.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37c87aa7a90b7ff3e0fe36cccd475df8d67f15f07f4d6c370c4b38464232813c"
 dependencies = [
+ "half",
  "ndarray",
  "ort-sys",
  "smallvec",
@@ -4577,6 +4578,7 @@ dependencies = [
  "clap_mangen",
  "dirs",
  "fastembed",
+ "half",
  "hf-hub 1.0.0",
  "indicatif",
  "memmap2",
