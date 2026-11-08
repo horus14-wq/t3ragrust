@@ -76,7 +76,7 @@ impl SparseSink {
     }
 
     /// Embed `batch` texts + append their sparse records.
-    pub fn write_batch(&mut self, batch: impl Iterator<Item = (u64, &str)>) -> Result<()> {
+    pub fn write_batch<'a>(&mut self, batch: impl Iterator<Item = (u64, &'a str)>) -> Result<()> {
         use std::io::Write;
         let rows: Vec<(u64, &str)> = batch.collect();
         let texts: Vec<&str> = rows.iter().map(|(_, t)| *t).collect();

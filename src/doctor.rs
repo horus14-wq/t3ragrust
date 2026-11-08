@@ -91,6 +91,10 @@ pub fn run_stats(name: Option<String>) -> Result<()> {
         }
     }
     println!("total:       {}", human_bytes(dir_size(&dir)));
+    // No `t3rag forget` exists by design (t3-css.4.5): a single-user
+    // cache is deleted by the user, not the tool — plain rm is the
+    // correct security model. The command below is the recipe.
+    println!("remove with: rm -rf {}", dir.display());
     Ok(())
 }
 
@@ -154,6 +158,7 @@ pub fn run_doctor() -> Result<()> {
         })
         .unwrap_or(0);
     println!("corpora:     {} under {}", n_corpora, root.display());
+    println!("             (delete one yourself: rm -rf <path>; t3-css.4.5)");
     // Daemon reachability (no spawn — report only).
     let info = paths::cache_root()?.join("daemon.json");
     if let Ok(dj) = std::fs::read_to_string(&info) {
