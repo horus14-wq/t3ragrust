@@ -24,6 +24,11 @@ pub struct Cli {
 }
 
 impl Cli {
+    /// Dispatch the parsed subcommand. `search`/`ask` first merge
+    /// `--config` TOML defaults into their unset `Option` args.
+    ///
+    /// # Errors
+    /// Config load/parse fails, or the subcommand's `run_*` fails.
     pub fn run(self) -> Result<()> {
         let cfg = crate::config::load(self.config.as_deref())?;
         match self.command {
@@ -670,13 +675,18 @@ pub struct SkillArgs {
 /// Agent-specific skills-dir preset for `t3rag skill --agents`.
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum SkillAgents {
+    /// `.claude/skills` (Claude Code).
     Claude,
+    /// `.devin/skills` (Devin).
     Devin,
+    /// `.agents/skills` (Cursor-compatible shared dir).
     Cursor,
+    /// `.agents/skills` (plain agents dir).
     Generic,
 }
 
 impl SkillAgents {
+    /// Repo-relative skills directory this preset installs into.
     pub fn skills_dir(self) -> &'static str {
         match self {
             Self::Claude => ".claude/skills",
@@ -699,9 +709,13 @@ pub enum DaemonMode {
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 pub enum Quantization {
+    /// 8-bit integer — smallest/faster, default.
     I8,
+    /// Brain floating point.
     Bf16,
+    /// IEEE half precision.
     F16,
+    /// Full precision — largest/slower, best recall ceiling.
     Fp32,
 }
 

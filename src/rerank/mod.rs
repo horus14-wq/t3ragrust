@@ -73,7 +73,9 @@ pub fn spec(name: &str) -> Result<ModelSpec> {
 /// the generic extra-inputs list (token_type_ids etc., t3-bcr). Same
 /// concurrency model as [`crate::embed::Embedder`].
 pub struct Reranker {
+    /// ORT session (serialized per session by the pool's `Mutex`).
     session: Session,
+    /// HF tokenizer with pair-encoding + truncation configured.
     tokenizer: Tokenizer,
     /// Non-pair inputs declared by the export (name, declared dims, is_f32):
     /// token_type_ids -> zeros, past_key_values.* -> empty cache.
@@ -243,14 +245,20 @@ impl Reranker {
 }
 
 /// Parallel reranker pool — mirrors [`crate::embed::EmbedderPool`].
-/// Per-name lazy pool of [`Reranker`] sessions — mirrors
-/// [`crate::embed::EmbedderPool`]; the daemon keeps one per requested
-/// reranker name so different queries can use different models.
+///
+/// The daemon keeps one pool per requested reranker name so different
+/// queries can use different models.
 pub struct RerankerPool {
+    /// Mutex-guarded sessions (ORT `run` needs `&mut`).
     sessions: Vec<Mutex<Reranker>>,
 }
 
 impl RerankerPool {
+    /// Load `size` reranker sessions of `spec` (first call downloads the
+    /// model). `threads == 0` divides machine cores across sessions.
+    ///
+    /// # Errors
+    /// The model/tokenizer cannot be fetched or a session fails.
     pub fn load(
         spec: &ModelSpec,
         threads: usize,

@@ -14,9 +14,10 @@ use anyhow::{bail, Context, Result};
 
 use crate::passage::Passage;
 
-/// Streams passages into `passages.bin` / `passages.idx` inside `dir`.
-/// Holds no corpus data in memory — each record is serialized and flushed.
-/// Build-time writer for `passages.bin`/`passages.idx`/`vectors.raw.f32`.
+/// Build-time writer for `passages.bin`/`passages.idx`.
+///
+/// Streams passages into both files inside `dir`, holding no corpus
+/// data in memory — each record is serialized and flushed.
 pub struct PassageWriter {
     bin: BufWriter<File>,
     idx: BufWriter<File>,
@@ -48,12 +49,13 @@ impl PassageWriter {
         })
     }
 
-    /// Append one passage. `passage.id` must equal the ordinal write position
-    /// (0,1,2,...) so the idx stays a plain offset table.
-    /// Append a passage (postcard + index entry + raw vector slot).
+    /// Append one passage (postcard + index entry). `passage.id` must
+    /// equal the ordinal write position (0,1,2,...) so the idx stays a
+    /// plain offset table.
     ///
     /// # Errors
-    /// Serialization or write fails.
+    /// `passage.id` is not the next dense ordinal, or serialization or
+    /// write fails.
     pub fn push(&mut self, passage: &Passage) -> Result<()> {
         if passage.id != self.next_id {
             bail!(
@@ -72,13 +74,12 @@ impl PassageWriter {
         Ok(())
     }
 
-    /// Flush both files and fsync. Returns the number of records written.
-    /// Dropping without `finish` leaves the corpus incomplete (missing idx
-    /// tail is detectable on open).
-    /// Flush + return the stored doc count.
+    /// Flush + fsync both files and return the stored doc count.
+    /// Dropping without `finish` leaves the corpus incomplete (the
+    /// truncated tail is detectable on open).
     ///
     /// # Errors
-    /// The index or raw-vector header fails to write.
+    /// A flush or sync fails.
     pub fn finish(mut self) -> Result<u64> {
         self.bin.flush()?;
         self.idx.flush()?;

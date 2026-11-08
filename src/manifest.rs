@@ -201,17 +201,26 @@ const EN_FUNCTION_WORDS: &[&str] = &[
 /// persisted [`CorpusManifest`]. Cheap: per-passage work is a few `contains`
 /// scans + question tokenization; language stats sample every 8th passage.
 pub struct ManifestAcc {
+    /// Passages per heuristic transform class (raw/reflect/struct/semantic).
     transform: FxHashMap<&'static str, u64>,
+    /// Question-token document frequencies (top-terms candidates).
     terms: FxHashMap<String, u64>,
+    /// Passage-length histogram buckets (<500, <2K, <8K, >=8K chars).
     len_hist: [u64; 4],
+    /// Running sum of stored passage vectors (centroid numerator).
     centroid_sum: Vec<f32>,
+    /// Vectors accumulated into `centroid_sum`.
     centroid_n: u64,
+    /// English function-word hits in the language sample.
     en_hits: u64,
+    /// Total words in the language sample.
     lang_words: u64,
+    /// Passages sampled for language stats (every 8th).
     sampled: u64,
 }
 
 impl ManifestAcc {
+    /// Fresh accumulator sized for `dims`-wide passage vectors.
     pub fn new(dims: usize) -> Self {
         Self {
             transform: FxHashMap::default(),

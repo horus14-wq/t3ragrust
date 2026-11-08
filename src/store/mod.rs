@@ -21,14 +21,20 @@ pub const FORMAT_VERSION: u32 = 2;
 /// Per-corpus metadata persisted as `meta.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CorpusMeta {
+    /// Layout version — see [`FORMAT_VERSION`]; readers refuse newer.
     pub format_version: u32,
+    /// Embedder spec the vectors were built with.
     pub model: String,
+    /// Vector dimensionality.
     pub dims: u32,
+    /// Quantization scheme (e.g. `f32`, `i8`).
     pub quantization: String,
+    /// Number of passages in the corpus.
     pub doc_count: u64,
     // Provenance (t3-css.4.7): corpora self-describe their build so
     // stats/doctor/eval can compare; Option+default keeps older
     // metas (written before these fields existed) parseable.
+    /// RFC3339 build timestamp.
     #[serde(default)]
     pub created_at: Option<String>,
     /// `<host>:<user>:<input-path>` — warns on cross-origin reuse.

@@ -7,11 +7,10 @@
 //! unknown repos get the honest generic defaults: no instruction, declared-
 //! inputs-only feeding, dims discovered at runtime.
 
-/// Filename candidates inside an `onnx-community`-style HF export, in
-/// preference order (uint8/int8 preferred; fp16 last — a known ORT
-/// per-thread memory blowup; fp32 exports carry external `_data` siblings).
 /// ONNX export names probed in order inside a model repo — the
-/// `onnx/` subdir variants preferred over the root export.
+/// `onnx/` subdir variants preferred over the root export
+/// (uint8/int8 preferred; fp16 last — a known ORT per-thread memory
+/// blowup; fp32 exports carry external `_data` siblings).
 pub const ONNX_FILE_CANDIDATES: [&str; 5] = [
     "onnx/model_uint8.onnx",
     "onnx/model_int8.onnx",
@@ -20,20 +19,22 @@ pub const ONNX_FILE_CANDIDATES: [&str; 5] = [
     "onnx/model.onnx",
 ];
 
-/// Root-level fp32 export candidates (e.g. `Qwen3-Embedding-4B-ONNX` ships
+/// Root-level `model.onnx` fallback for fp32/fp16 exports that keep
+/// weights in a `_data` sibling (e.g. `Qwen3-Embedding-4B-ONNX` ships
 /// `model.onnx` + `model.onnx_data` at the repo ROOT, no `onnx/` dir).
-/// Root-level `model.onnx` fallback (fp32/fp16 exports that keep
-/// weights in a `_data` sibling).
 pub const ONNX_ROOT_FILE_CANDIDATES: [&str; 1] = ["model.onnx"];
 
 /// One registry row: known repo → retrieval behavior (public for `t3rag models`).
 pub struct RegistryEntry {
+    /// HF repo id this row describes.
     pub repo: &'static str,
     /// Query-side instruction prefix ("" when the model isn't instruct-tuned).
     pub instruction: &'static str,
     /// Passage-side prefix (e5 wants `passage: `; most want nothing).
     pub passage_instruction: &'static str,
+    /// Expected embedding dimension.
     pub dims: usize,
+    /// ONNX file candidates to probe inside the repo.
     pub onnx_files: &'static [&'static str],
 }
 

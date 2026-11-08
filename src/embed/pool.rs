@@ -13,15 +13,20 @@ use super::{Embedder, ModelSpec};
 use crate::cli::Ep;
 
 /// A pool of [`Embedder`] sessions: `size` independent sessions for
-/// parallel passage embedding, round-robin on call.
+/// parallel passage embedding. Each session owns a private model copy
+/// (~600MB per session for the 0.6B); `embed_passages` splits a batch
+/// into per-session chunks run concurrently on scoped threads — the
+/// merged-KV model is latency-bound per call, so K sessions give ~K×
+/// index throughput on multi-core boxes. The daemon reuses this as its
+/// inference-semaphore mechanism (t3-wkp.12).
 pub struct EmbedderPool {
     embedders: Vec<Mutex<Embedder>>,
 }
 
 impl EmbedderPool {
-    /// Load `size` sessions of the same model. `threads == 0` divides the
-    /// machine's cores evenly across sessions (min 1).
     /// Load `size` sessions of `spec` (first call downloads the model).
+    /// `threads == 0` divides the machine's cores evenly across sessions
+    /// (min 1); otherwise `threads` intra-op threads per session.
     ///
     /// # Errors
     /// The model/tokenizer cannot be fetched or a session fails.
@@ -51,8 +56,8 @@ impl EmbedderPool {
         self.embedders[0].lock().unwrap().dims()
     }
 
-    /// Embed one query (instruction prefix applied) — uses session 0.
-    /// Embed `query` with the registry's query instruction prefix.
+    /// Embed `query` with the registry's query instruction prefix
+    /// (single session — queries are latency-critical, not throughput).
     ///
     /// # Errors
     /// Tokenization or the forward pass fails.
@@ -60,10 +65,10 @@ impl EmbedderPool {
         self.embedders[0].lock().unwrap().embed_query(query)
     }
 
-    /// Embed a batch of passages, split across pool sessions and run
-    /// concurrently; results stay in input order.
-    /// Embed `texts` (borrowed slices, t3-css.2.9) with the passage
-    /// instruction; results align one-to-one with the input.
+    /// Embed `texts` with the passage instruction prefix, split across
+    /// pool sessions and run concurrently; results stay in input order
+    /// (one vector per input text). Small batches run on a single
+    /// session — splitting overhead isn't worth it.
     ///
     /// # Errors
     /// Tokenization or a session's forward pass fails.

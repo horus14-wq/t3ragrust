@@ -18,7 +18,9 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind};
 
 use crate::cli::Quantization;
 
+/// HNSW graph artifact filename inside a corpus dir.
 pub const DENSE_FILE: &str = "vectors.usearch";
+/// Raw fp32 vector blob filename (exact-scan reference + rebuild source).
 pub const RAW_FILE: &str = "vectors.raw.f32";
 
 /// HNSW params (tuneable via IndexOptions fields if needed later).
@@ -26,6 +28,7 @@ const CONNECTIVITY: usize = 16;
 const EXPANSION_ADD: usize = 128;
 const EXPANSION_SEARCH: usize = 64;
 
+/// Map a [`Quantization`] choice onto usearch's scalar kind.
 fn scalar_kind(q: Quantization) -> ScalarKind {
     match q {
         Quantization::I8 => ScalarKind::I8,
@@ -35,6 +38,8 @@ fn scalar_kind(q: Quantization) -> ScalarKind {
     }
 }
 
+/// usearch options for cosine-IP search: vectors are L2-normalized, so
+/// inner product == cosine; `multi: false` (one label per key).
 fn options(
     dims: usize,
     q: Quantization,
@@ -106,6 +111,11 @@ impl DenseBuilder {
         })
     }
 
+    /// Add one `(passage_id, vector)` pair to the ANN graph and (when
+    /// enabled) the raw blob. Grows the index reserve geometrically.
+    ///
+    /// # Errors
+    /// `vector` length != index dims, or a usearch/file write fails.
     pub fn add(&mut self, id: u64, vector: &[f32]) -> Result<()> {
         if vector.len() != self.dims {
             bail!("vector dims {} != index dims {}", vector.len(), self.dims);
@@ -130,7 +140,7 @@ impl DenseBuilder {
     }
 
     /// Persist index + patch raw header + fsync.
-    pub fn finish(mut self) -> Result<usize> {
+    pub fn finish(self) -> Result<usize> {
         self.index
             .save(self.index_path.to_str().context("non-utf8 index path")?)
             .map_err(|e| anyhow::anyhow!("usearch save {}: {e}", self.index_path.display()))?;
@@ -156,6 +166,13 @@ pub struct DenseIndex {
 }
 
 impl DenseIndex {
+    /// Open a query-time view over `dir`'s dense artifacts: mmap the
+    /// HNSW graph plus the raw blob when present (`--no-raw-vectors`
+    /// corpora still serve ANN search).
+    ///
+    /// # Errors
+    /// The index file is missing/unreadable, or `dims`/`quant` don't
+    /// match the build.
     pub fn view(dir: &Path, dims: usize, quant: Quantization) -> Result<Self> {
         let index_path = dir.join(DENSE_FILE);
         let index = Index::new(&options(dims, quant, CONNECTIVITY, EXPANSION_ADD))

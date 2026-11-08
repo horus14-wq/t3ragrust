@@ -18,21 +18,19 @@ pub use pool::EmbedderPool;
 pub use session::Embedder;
 
 /// Instruction prefix applied to *queries only* — the Qwen3-Embedding
-/// convention (instruction-tuned retrieve-over-traces prompt).
-/// passages are embedded bare). Tuneable via [`ModelSpec`].
+/// convention. Passages are embedded bare. Tuneable via [`ModelSpec`].
 pub const DEFAULT_QUERY_INSTRUCTION: &str =
     "Instruct: Given a question, retrieve thinking traces whose reasoning helps answer it\nQuery: ";
 
-/// Hard cap on tokens fed to the embedder. Matches the chunking policy's
-/// ~8K threshold (t3-wkp.11); passages above this are chunked at index time,
-/// and this bound keeps any un-chunked stragglers from blowing up inference.
 /// Max tokens per passage before head-truncation at embed time.
+/// Matches the chunking policy's ~8K threshold (t3-wkp.11): passages
+/// above this are chunked at index time, and this bound keeps any
+/// un-chunked stragglers from blowing up inference.
 pub const MAX_EMBED_TOKENS: usize = 8192;
 
-/// Resolve a `--model` flag value to a spec. Aliases first, then treat the
-/// value as a HF repo id (same filename/layout conventions assumed).
 /// Resolve a `--model`/`T3RAG_MODEL` flag to a [`ModelSpec`]: known
-/// registry entry, `owner/name` repo id, else the default model.
+/// registry entry or alias first, then an `owner/name` HF repo id
+/// (same filename/layout conventions assumed), else the default model.
 pub fn resolve_model(flag: Option<&str>) -> ModelSpec {
     match flag.unwrap_or("qwen3-0.6b") {
         "qwen3-0.6b" | "0.6b" | "qwen3" | "default" => ModelSpec::qwen3_embedding_0_6b(),

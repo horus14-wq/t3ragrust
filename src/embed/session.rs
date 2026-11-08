@@ -113,17 +113,20 @@ pub(crate) fn ort_env() -> Result<Arc<ort::environment::Environment>> {
 /// Qwen3 pad token id ("endoftext"), used for right-padding batches.
 const PAD_ID: u32 = 151643;
 
-/// One loaded embedding model: ONNX session + tokenizer. Not `Sync`-safe to
-/// call concurrently (ORT `run` takes `&mut self`) — the daemon/session pool
-/// clones or wraps instances behind a semaphore.
 /// A loaded ONNX embedding session: tokenizer + ORT session +
 /// declared-input feeding (registry instructions, generic extra
 /// inputs). Not `Sync` — pooled behind [`crate::embed::EmbedderPool`].
 pub struct Embedder {
+    /// ORT session; `run` takes `&mut self`, so concurrent callers must
+    /// serialize (the pool's per-session `Mutex` does this).
     session: Session,
+    /// HF `tokenizer.json` with truncation/padding configured.
     tokenizer: Tokenizer,
+    /// Embedding width, discovered by a probe forward pass at load.
     dims: usize,
+    /// Query-side instruction prefix ("" when the model isn't instruct-tuned).
     instruction: String,
+    /// Passage-side prefix (e5-family `passage: `; empty for most models).
     passage_instruction: String,
     /// Input names the export declares (t3-css.1.2) — position_ids/
     /// attention_mask/token_type_ids are fed only when present; non-Qwen
@@ -135,7 +138,13 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    /// Download (or reuse HF cache) and load the model.
+    /// Download (or reuse HF cache) and load the model: fetch ONNX +
+    /// tokenizer, build the ORT session with the requested EP, configure
+    /// the tokenizer, and probe dims with a warmup forward pass.
+    ///
+    /// # Errors
+    /// Files cannot be fetched, the session/tokenizer fails to build, or
+    /// the probed dims contradict `spec.dims`.
     pub fn load(spec: &ModelSpec, intra_threads: usize, ep: Ep) -> Result<Self> {
         let (onnx_path, tokenizer_path) = fetch_files(spec)?;
         let eps = providers_for(ep)?;
@@ -229,6 +238,7 @@ impl Embedder {
         Ok(emb)
     }
 
+    /// Embedding dimension of the loaded model (0 until `load` probes it).
     pub fn dims(&self) -> usize {
         self.dims
     }
@@ -351,6 +361,8 @@ impl Embedder {
     }
 }
 
+/// In-place L2 normalization; a zero vector is left untouched (norm 0
+/// would produce NaNs — callers rely on non-degenerate embeddings).
 fn l2_normalize(v: &mut [f32]) {
     let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {

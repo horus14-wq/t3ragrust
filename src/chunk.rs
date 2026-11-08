@@ -32,13 +32,9 @@ pub fn needs_chunk_thresh(text: &str, thresh_est_tokens: usize) -> bool {
 }
 
 /// Split `text` into retrievable chunks on structural boundaries
-/// (paragraphs/sections), each under the token budget. Parents are
-/// stored un-embedded and hydrated at query time (t3-wkp.11).
-pub fn split(text: &str) -> Vec<String> {
-    split_with_target(text, CHUNK_TARGET_CHARS)
-}
-
-/// Same splitter with a target-size override (t3-css.2.8 `--chunk-chars`).
+/// (paragraphs/sections), packed under `target_chars`. Passages under
+/// the chunk trigger return as a single-element vec. Parents are stored
+/// un-embedded and hydrated at query time (t3-wkp.11).
 pub fn split_with_target(text: &str, target_chars: usize) -> Vec<String> {
     if !needs_chunk(text) {
         return vec![text.to_string()];
@@ -131,7 +127,10 @@ mod tests {
     fn short_passage_not_chunked() {
         let t = "short passage";
         assert!(!needs_chunk(t));
-        assert_eq!(split(t), vec![t.to_string()]);
+        assert_eq!(
+            split_with_target(t, CHUNK_TARGET_CHARS),
+            vec![t.to_string()]
+        );
     }
 
     #[test]
@@ -141,7 +140,7 @@ mod tests {
             .map(|_| para.clone())
             .collect::<Vec<_>>()
             .join("\n\n");
-        let chunks = split(&text);
+        let chunks = split_with_target(&text, CHUNK_TARGET_CHARS);
         assert!(
             chunks.len() >= 3,
             "expected multiple chunks, got {}",
@@ -162,7 +161,7 @@ mod tests {
     #[test]
     fn giant_single_block_hard_splits() {
         let text = "y".repeat(60_000);
-        let chunks = split(&text);
+        let chunks = split_with_target(&text, CHUNK_TARGET_CHARS);
         assert!(chunks.len() >= 4);
         for c in &chunks {
             assert!(c.len() <= CHUNK_TARGET_CHARS + 1024);

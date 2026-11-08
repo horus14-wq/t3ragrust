@@ -13,9 +13,13 @@ use serde::Deserialize;
 /// t3-css.3.1). Flags win over config.
 #[derive(Deserialize, Default)]
 pub struct Config {
+    /// Default `--corpus` for `search`/`ask`.
     pub corpus: Option<String>,
+    /// Default `--model` embedder spec.
     pub model: Option<String>,
+    /// Default `--reranker` spec.
     pub reranker: Option<String>,
+    /// Default `--instruction` query prefix override.
     pub instruction: Option<String>,
 }
 

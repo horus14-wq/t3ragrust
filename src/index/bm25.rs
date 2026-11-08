@@ -20,11 +20,17 @@ use crate::passage::Passage;
 
 pub const BM25_DIR: &str = "bm25";
 
+/// Tantivy field handles for the `bm25/` schema (rebuilt per open).
 pub struct SchemaFields {
+    /// Stored dense passage id — the join key back to the passage store.
     pub passage_id: Field,
+    /// Indexed passage body text (BM25 leg).
     pub text: Field,
+    /// Indexed optional title.
     pub title: Field,
+    /// Indexed optional originating question.
     pub question: Field,
+    /// Stored+indexed provenance tag (exact STRING match).
     pub source: Field,
 }
 
@@ -86,6 +92,11 @@ impl Bm25Builder {
         Ok(Self { writer, fields })
     }
 
+    /// Index one passage: `passage_id` + `text` always; `title`,
+    /// `question`, `source` only when present.
+    ///
+    /// # Errors
+    /// The tantivy writer rejects the document.
     pub fn add(&mut self, p: &Passage) -> Result<()> {
         let f = &self.fields;
         let mut d = doc!(f.passage_id => p.id, f.text => p.text.clone());
@@ -104,6 +115,10 @@ impl Bm25Builder {
         Ok(())
     }
 
+    /// Commit all buffered docs and close the writer.
+    ///
+    /// # Errors
+    /// The tantivy commit fails.
     pub fn commit(mut self) -> Result<()> {
         self.writer.commit().context("tantivy commit")?;
         Ok(())
@@ -120,6 +135,12 @@ pub struct Bm25Index {
 }
 
 impl Bm25Index {
+    /// Open the `bm25/` index under `corpus_dir` and build its pooled
+    /// reader (one per corpus — the daemon keeps it warm).
+    ///
+    /// # Errors
+    /// The index directory is missing/unreadable, a schema field is
+    /// absent, or the reader cannot be built.
     pub fn open(corpus_dir: &Path) -> Result<Self> {
         let dir = corpus_dir.join(BM25_DIR);
         let index = Index::open_in_dir(&dir)

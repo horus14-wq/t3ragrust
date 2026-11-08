@@ -71,7 +71,9 @@ impl SparseEngine {
 /// Buffered writer for `sparse.bin` (t3-css.4.3 index path): wraps
 /// the engine + a file, one `write_batch` per embed flush.
 pub struct SparseSink {
+    /// SPLADE embedder (model weights loaded once at construction).
     engine: SparseEngine,
+    /// Append-only `sparse.bin` handle.
     out: std::fs::File,
 }
 
@@ -86,7 +88,10 @@ impl SparseSink {
         Ok(Self { engine, out })
     }
 
-    /// Embed `batch` texts + append their sparse records.
+    /// Embed `batch` texts + append their sparse records to `sparse.bin`.
+    ///
+    /// # Errors
+    /// Embedding or the file write fails.
     pub fn write_batch<'a>(&mut self, batch: impl Iterator<Item = (u64, &'a str)>) -> Result<()> {
         use std::io::Write;
         let rows: Vec<(u64, &str)> = batch.collect();
@@ -162,6 +167,8 @@ pub fn score(docs: &[(u64, SparseVec)], q: &SparseVec) -> Vec<(u64, f32)> {
     out
 }
 
+/// Sorted-merge dot product over two sparse vectors (both index lists
+/// ascending). O(|a| + |b|).
 fn dot(ai: &[u32], av: &[f32], bi: &[u32], bv: &[f32]) -> f32 {
     let mut i = 0usize;
     let mut j = 0usize;

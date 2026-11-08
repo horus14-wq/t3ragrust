@@ -24,6 +24,7 @@ pub use dense::{DenseBuilder, DenseIndex};
 // attention masks; unbounded batches exceed ORT's 4GB tensor limit).
 
 /// Hostname for provenance records (`meta.json.origin`).
+/// Falls back to `"unknown"` outside Linux/container hosts.
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
@@ -296,9 +297,14 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
 
 #[cfg(feature = "sparse")]
 use crate::sparse::SparseSink;
+/// Stub for non-`sparse` builds: `--sparse` bails before this is ever
+/// constructed (feature-gated use only).
 #[cfg(not(feature = "sparse"))]
-struct SparseSink; // never instantiated (feature-gated use only)
+struct SparseSink;
 
+/// Embed one drained batch and fan results out to the dense builder,
+/// sparse sink, and manifest centroid accumulator. No-op on empty
+/// batches.
 fn flush_batch(
     emb: &EmbedderPool,
     dense: &mut DenseBuilder,
@@ -326,6 +332,7 @@ fn flush_batch(
     Ok(())
 }
 
+/// Unix-seconds timestamp for build-dir rotation suffixes.
 fn now_ts() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

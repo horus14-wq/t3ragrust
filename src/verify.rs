@@ -13,19 +13,26 @@ use crate::store;
 
 /// One check outcome.
 pub struct Check {
+    /// Check label shown in the report (e.g. `passages`, `bm25/`).
     pub name: &'static str,
+    /// Whether the check passed.
     pub ok: bool,
+    /// Human-readable detail (counts, sizes, error text).
     pub detail: String,
 }
 
 /// Full verification report for one corpus dir.
 pub struct VerifyReport {
+    /// Corpus name.
     pub corpus: String,
+    /// Corpus artifact directory.
     pub dir: PathBuf,
+    /// All checks run, in report order.
     pub checks: Vec<Check>,
 }
 
 impl VerifyReport {
+    /// Whether every check passed.
     pub fn ok(&self) -> bool {
         self.checks.iter().all(|c| c.ok)
     }
@@ -208,6 +215,8 @@ pub fn verify_dir(name: &str, dir: &Path) -> VerifyReport {
     }
 }
 
+/// Parse `meta.json`'s quantization string back into the enum; unknown
+/// values fall back to `I8` (the build default).
 fn parse_quant(s: &str) -> crate::cli::Quantization {
     use crate::cli::Quantization::*;
     match s {
