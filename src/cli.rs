@@ -231,6 +231,13 @@ pub struct SearchArgs {
     /// applied before top_k so the list still fills (t3-b68).
     #[arg(long, value_delimiter = ',')]
     pub exclude: Vec<u64>,
+    /// More-like-this: dense search seeded by a passage id's text — the
+    /// seed id is excluded from results (t3-kz0; daemon path).
+    #[arg(long)]
+    pub like: Option<u64>,
+    /// More-like-this seeded by ad-hoc text instead of a passage id.
+    #[arg(long)]
+    pub like_text: Option<String>,
     /// Enable the cross-encoder reranker (default).
     #[arg(long, overrides_with = "no_rerank")]
     pub rerank: bool,

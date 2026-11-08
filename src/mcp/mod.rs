@@ -51,6 +51,8 @@ fn tools_list() -> Value {
                     "max_chars": {"type": "integer", "description": "truncate passage text"},
                     "min_score": {"type": "number", "description": "drop hits below score"},
                     "sparse": {"type": "boolean", "default": false, "description": "add the learned SPLADE leg (corpus must have sparse.bin)"},
+                    "like": {"type": "integer", "description": "more-like-this: dense search seeded by a passage id (seed excluded)"},
+                    "like_text": {"type": "string", "description": "more-like-this seeded by ad-hoc text"},
                     "queries": {"type": "array", "items": {"type": "string"}, "description": "extra query phrasings fused into the ranking"},
                     "exclude": {"type": "array", "items": {"type": "integer"}, "description": "passage ids to exclude from results (iterative refinement)"},
                     "rerank_candidates": {"type": "integer", "description": "candidates fed to reranker"},

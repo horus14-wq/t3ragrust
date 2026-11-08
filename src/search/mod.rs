@@ -205,6 +205,8 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "min_score": args.min_score,
             "offset": args.offset,
             "exclude": args.exclude,
+            "like": args.like,
+            "like_text": args.like_text,
             "sparse": args.sparse,
             "queries": args.also,
         }))
@@ -296,7 +298,19 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     let lex = Bm25Index::open(&corpus)?;
     let reader = PassageReader::open(&corpus)?;
 
-    let qvec = emb.embed_query(&args.query)?;
+    // --like (t3-kz0): seed the dense leg with a passage's own text
+    // (id or ad-hoc text) — no BM25, seed excluded from results.
+    let like_seed = if let Some(lt) = &args.like_text {
+        Some(lt.clone())
+    } else {
+        args.like
+            .map(|id| reader.get(id).map(|p| p.text))
+            .transpose()?
+    };
+    let qvec = match &like_seed {
+        Some(seed) => emb.embed_passages(&[seed.as_str()])?.remove(0),
+        None => emb.embed_query(&args.query)?,
+    };
     // MRL dims (t3-css.2.4): query vectors truncate to the corpus's stored
     // dims so --dims N indexes serve without a query-side flag.
     let qvec = truncate_unit(&qvec, meta.dims as usize);
@@ -305,15 +319,26 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     } else {
         dense.search(&qvec, candidates, args.ef_search)?
     };
-    let bm = lex.search(&args.query, candidates).unwrap_or_else(|e| {
-        warn!("bm25 leg failed: {e:#}");
-        Vec::new()
-    });
-    let fused = rrf_fuse(
-        &[ann, bm],
-        args.rrf_k,
-        &[args.dense_weight, args.bm25_weight],
-    );
+    let (fused, legs) = if like_seed.is_none() {
+        let bm = lex.search(&args.query, candidates).unwrap_or_else(|e| {
+            warn!("bm25 leg failed: {e:#}");
+            Vec::new()
+        });
+        (
+            rrf_fuse(
+                &[ann, bm],
+                args.rrf_k,
+                &[args.dense_weight, args.bm25_weight],
+            ),
+            "dense+bm25",
+        )
+    } else {
+        (
+            rrf_fuse(&[ann], args.rrf_k, &[args.dense_weight]),
+            "dense(like)",
+        )
+    };
+    tracing::debug!(legs, "cold-path fusion");
 
     let mut ranked: Vec<(u64, f32)> = fused;
     if rerank {
@@ -369,6 +394,9 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
             p
         };
         if exclude.contains(&parent.id) {
+            continue;
+        }
+        if args.like.is_some_and(|s| s == parent.id) {
             continue;
         }
         if !seen_parents.insert(parent.id) {

@@ -148,6 +148,10 @@ struct SearchRequest {
     max_chars: Option<usize>,
     min_score: Option<f32>,
     offset: Option<usize>,
+    /// t3-kz0: more-like-this — dense search against a seed passage id
+    /// (or ad-hoc text via `like_text`); the seed id is excluded.
+    like: Option<u64>,
+    like_text: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -527,9 +531,26 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     if let Some(extra) = &req.queries {
         queries.extend(extra.iter().cloned());
     }
+    // t3-kz0: --like replaces the query with a passage-side embedding of
+    // a seed (corpus passage by id, or ad-hoc text) — dense leg only.
+    let like_seed = if let Some(lt) = &req.like_text {
+        Some(lt.clone())
+    } else {
+        match req.like {
+            Some(id) => Some(corpora[0].1.reader.get(id)?.text),
+            None => None,
+        }
+    };
     let t_embed = Instant::now();
     let mut qvecs = Vec::with_capacity(queries.len());
+    if let Some(seed) = &like_seed {
+        let mut v = st.embedder.embed_passages(&[seed.as_str()])?;
+        qvecs.push(std::mem::take(&mut v[0]));
+    }
     for q in &queries {
+        if like_seed.is_some() {
+            break; // seed vector replaces query embeddings entirely
+        }
         let cached = st.query_cache.lock().unwrap().get(q);
         let v = match cached {
             Some(v) => v,
@@ -580,8 +601,15 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
                 corpus.dense.search(&qv, cand, req.ef_search)?
             };
             dense_ms += t_dense.elapsed().as_secs_f64() * 1000.0;
-            let bm = corpus.lex.search(q, cand).unwrap_or_default();
-            bm25_ms += t_bm.elapsed().as_secs_f64() * 1000.0;
+            // --like is dense-only (t3-kz0): BM25 on a seed passage is
+            // noise, and there may be no query text at all (like_text).
+            let bm = if like_seed.is_none() {
+                let bm = corpus.lex.search(q, cand).unwrap_or_default();
+                bm25_ms += t_bm.elapsed().as_secs_f64() * 1000.0;
+                bm
+            } else {
+                Vec::new()
+            };
             for (id, s) in &ann {
                 let e = ann_map.entry(*id).or_insert(f32::NEG_INFINITY);
                 *e = e.max(*s);
@@ -592,8 +620,10 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             }
             all_legs.push(ann);
             all_weights.push(req.dense_weight.unwrap_or(1.0));
-            all_legs.push(bm);
-            all_weights.push(req.bm25_weight.unwrap_or(1.0));
+            if !bm.is_empty() {
+                all_legs.push(bm);
+                all_weights.push(req.bm25_weight.unwrap_or(1.0));
+            }
         }
         // Third leg (t3-css.4.3): SPLADE when requested + sparse.bin exists.
         #[cfg(feature = "sparse")]
@@ -732,6 +762,10 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             if score < ms {
                 continue;
             }
+        }
+        // t3-kz0: never return the --like seed itself.
+        if req.like.is_some_and(|s| s == id) {
+            continue;
         }
         let (_name, corpus) = &corpora[ci];
         let p = corpus.reader.get(id)?;
@@ -993,6 +1027,8 @@ async fn mcp_http(
                 exclude: args["exclude"]
                     .as_array()
                     .map(|a| a.iter().filter_map(|v| v.as_u64()).collect()),
+                like: args["like"].as_u64(),
+                like_text: args["like_text"].as_str().map(String::from),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))
