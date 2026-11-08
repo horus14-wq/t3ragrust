@@ -24,14 +24,26 @@ use crate::embed::ModelSpec;
 /// Pairs are truncated to this length — reranking reads the whole passage
 /// only for the final top-few, so head-truncation is the speed/quality sweet spot.
 /// Pair truncation cap (`--rerank-tokens` overrides via `Reranker::load`).
+/// Pair truncation cap for the cross-encoder (query+passage tokens).
+/// Longer pairs help little but cost quadratically — 512 is the
+/// speed/quality sweet spot for final top-few rescoring.
 pub const RERANK_MAX_TOKENS: usize = 512;
+
 const PAD_ID: u32 = 1; // XLM-RoBERTa pad token
 
-/// Default reranker model: BGE-v2-m3 ONNX (multilingual, strong cross-encoder).
+/// Default reranker model: BGE-v2-m3 ONNX (multilingual, strong
+/// cross-encoder; ~1.2s/pair on CPU — the `balanced` preset swaps to
+/// minilm for latency).
 /// Reranker registry (t3-css.2.6) — measured on this box: bge-m3 (568M)
 /// costs ~1.2s per scored pair on CPU (~12s per 10-candidate rerank),
 /// MiniLM-L-6-v2 (~33M) is ~15-20× faster. Verified ONNX repos only;
 /// each follows the onnx-community/temsa layout the loader assumes.
+/// Resolve a reranker name or repo id to a [`ModelSpec`] (registry
+/// aliases: `minilm`/`bge-base`/`bge-m3`; anything else treated as a
+/// HF repo id with the default candidate list).
+///
+/// # Errors
+/// An unknown registry name that is not a plausible repo id.
 pub fn spec(name: &str) -> Result<ModelSpec> {
     match name {
         // temsa's cpu-qint8 and keisuke's int8 exports both reject padded
@@ -57,7 +69,9 @@ pub fn spec(name: &str) -> Result<ModelSpec> {
     }
 }
 
-/// A loaded cross-encoder session. Same concurrency model as [`crate::embed::Embedder`].
+/// A loaded cross-encoder session: tokenizer + ONNX session +
+/// the generic extra-inputs list (token_type_ids etc., t3-bcr). Same
+/// concurrency model as [`crate::embed::Embedder`].
 pub struct Reranker {
     session: Session,
     tokenizer: Tokenizer,
@@ -67,6 +81,11 @@ pub struct Reranker {
 }
 
 impl Reranker {
+    /// Build a reranker: fetch ONNX + tokenizer, then apply the
+    /// declared-input feeding (token_type_ids get `(batch, seq)` zeros).
+    ///
+    /// # Errors
+    /// Model files cannot be fetched, or the session fails to build.
     pub fn load(spec: &ModelSpec, intra_threads: usize, ep: Ep, max_tokens: usize) -> Result<Self> {
         let eps = crate::embed::session::providers_for(ep)?;
         let (onnx_path, tokenizer_path) = fetch_files(spec)?;
@@ -128,6 +147,10 @@ impl Reranker {
 
     /// Score (query, passage) pairs. Returns raw logits (monotonic rank signal;
     /// sigmoid if a probability is wanted downstream).
+    ///
+    /// # Errors
+    /// Tokenization or the ONNX forward fails (the daemon degrades to
+    /// fused ranking on failure rather than dropping the query).
     pub fn score_pairs(&mut self, pairs: &[(String, String)]) -> Result<Vec<f32>> {
         if pairs.is_empty() {
             return Ok(Vec::new());
@@ -220,6 +243,9 @@ impl Reranker {
 }
 
 /// Parallel reranker pool — mirrors [`crate::embed::EmbedderPool`].
+/// Per-name lazy pool of [`Reranker`] sessions — mirrors
+/// [`crate::embed::EmbedderPool`]; the daemon keeps one per requested
+/// reranker name so different queries can use different models.
 pub struct RerankerPool {
     sessions: Vec<Mutex<Reranker>>,
 }

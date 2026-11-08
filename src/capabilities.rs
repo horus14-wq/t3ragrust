@@ -12,6 +12,8 @@ use crate::embed::ModelSpec;
 use crate::paths;
 
 /// `t3rag capabilities` — full CLI surface as JSON.
+/// `t3rag capabilities`: the full CLI surface as JSON (commands,
+/// flags, env vars, endpoints) — the machine-readable agent contract.
 pub fn run_capabilities() -> Result<()> {
     let cmd = Cli::command();
     let out = serde_json::json!({
@@ -47,7 +49,8 @@ fn describe_cmd(c: &clap::Command) -> serde_json::Value {
     })
 }
 
-/// `t3rag models` — registry + cache status.
+/// `t3rag models`: the embedder registry + rerankers with HF-cache
+/// status (`cached`/`dims`/`instruction` columns).
 pub fn run_models() -> Result<()> {
     let hf = std::env::var_os("HOME")
         .map(|h| std::path::PathBuf::from(h).join(".cache/huggingface/hub"));
@@ -93,6 +96,11 @@ pub fn run_models() -> Result<()> {
 }
 
 /// `t3rag export <corpus>` — round-trip to JSONL.
+/// `t3rag export`: dump a corpus's passages back to JSONL (the
+/// round-trip that makes `index` inspectable).
+///
+/// # Errors
+/// The corpus is not indexed, or the output cannot be written.
 pub fn run_export(args: ExportArgs) -> Result<()> {
     let root = paths::corpora_root()?;
     let name = args.corpus.unwrap_or(crate::serve::newest_corpus(&root)?);
@@ -126,6 +134,7 @@ pub fn run_export(args: ExportArgs) -> Result<()> {
 }
 
 /// `t3rag completions <shell>` — generate shell completions.
+/// `t3rag completions`: emit shell completions to stdout.
 pub fn run_completions(shell: clap_complete::Shell) -> Result<()> {
     let mut cmd = Cli::command();
     let mut out = std::io::stdout();
@@ -134,6 +143,10 @@ pub fn run_completions(shell: clap_complete::Shell) -> Result<()> {
 }
 
 /// `t3rag man <dir>` — generate man pages into a directory.
+/// `t3rag man`: write one man page per subcommand into `dir`.
+///
+/// # Errors
+/// `dir` cannot be created, or a page fails to write.
 pub fn run_man(dir: &std::path::Path) -> Result<()> {
     let cmd = Cli::command();
     std::fs::create_dir_all(dir)?;

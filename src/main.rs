@@ -1,3 +1,9 @@
+#![warn(missing_docs)]
+//! `t3rag` — a local, Rust-native retrieval system over T3 thinking-trace
+//! corpora. Dense ANN (usearch) + BM25 (tantivy) fused by weighted RRF,
+//! with optional learned-sparse and cross-encoder legs, served from a
+//! per-user daemon over HTTP and MCP.
+
 mod bench;
 mod capabilities;
 mod chunk;
@@ -15,6 +21,8 @@ mod rerank;
 mod search;
 mod serve;
 mod skill;
+#[cfg(feature = "sparse")]
+mod sparse;
 mod store;
 
 use anyhow::Result;

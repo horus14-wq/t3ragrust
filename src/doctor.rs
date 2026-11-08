@@ -9,6 +9,7 @@ use crate::paths;
 use crate::store::{self, CorpusMeta};
 
 /// `t3rag list` — corpora table.
+/// `t3rag list`: every corpus — name, docs, dims, model, size, age.
 pub fn run_list() -> Result<()> {
     let root = paths::corpora_root()?;
     let mut rows: Vec<(String, CorpusMeta, u64, String)> = Vec::new();
@@ -59,6 +60,8 @@ pub fn run_list() -> Result<()> {
 }
 
 /// `t3rag stats [corpus]` — deep meta + on-disk layout for one corpus.
+/// `t3rag stats`: deep corpus inspection — metadata, index params,
+/// artifact files, total size, RAM estimate.
 pub fn run_stats(name: Option<String>) -> Result<()> {
     let root = paths::corpora_root()?;
     let name = name.unwrap_or(crate::serve::newest_corpus(&root)?);
@@ -92,6 +95,9 @@ pub fn run_stats(name: Option<String>) -> Result<()> {
 }
 
 /// `t3rag doctor` — environment sanity: SIMD, EPs, HF cache, daemon.
+/// `t3rag doctor`: environment sanity — SIMD compiled/available,
+/// execution providers, HF cache, model files, corpora, daemon
+/// health, versions, disk.
 pub fn run_doctor() -> Result<()> {
     println!("t3rag {}", env!("CARGO_PKG_VERSION"));
     // SIMD paths usearch reports (compiled vs available on this CPU).
@@ -165,6 +171,8 @@ pub fn run_doctor() -> Result<()> {
 }
 
 /// `t3rag health` — <50ms pre-flight sanity for agents.
+/// `t3rag health`: the <50ms agent pre-flight check — daemon + a
+/// corpus are reachable.
 pub fn run_health() -> Result<()> {
     let root = paths::corpora_root()?;
     if root.is_dir() {

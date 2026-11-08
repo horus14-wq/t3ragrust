@@ -10,6 +10,8 @@
 /// Filename candidates inside an `onnx-community`-style HF export, in
 /// preference order (uint8/int8 preferred; fp16 last — a known ORT
 /// per-thread memory blowup; fp32 exports carry external `_data` siblings).
+/// ONNX export names probed in order inside a model repo — the
+/// `onnx/` subdir variants preferred over the root export.
 pub const ONNX_FILE_CANDIDATES: [&str; 5] = [
     "onnx/model_uint8.onnx",
     "onnx/model_int8.onnx",
@@ -20,6 +22,8 @@ pub const ONNX_FILE_CANDIDATES: [&str; 5] = [
 
 /// Root-level fp32 export candidates (e.g. `Qwen3-Embedding-4B-ONNX` ships
 /// `model.onnx` + `model.onnx_data` at the repo ROOT, no `onnx/` dir).
+/// Root-level `model.onnx` fallback (fp32/fp16 exports that keep
+/// weights in a `_data` sibling).
 pub const ONNX_ROOT_FILE_CANDIDATES: [&str; 1] = ["model.onnx"];
 
 /// One registry row: known repo → retrieval behavior (public for `t3rag models`).
@@ -33,8 +37,10 @@ pub struct RegistryEntry {
     pub onnx_files: &'static [&'static str],
 }
 
-/// Known embedding models — each verified against its HF repo layout.
-/// Unknown repos fall through to `for_hf_repo`'s generic spec.
+/// Known embedding models — repo id, dims, query/passage instruction
+/// prefixes, ONNX candidate files — each verified against its HF repo
+/// layout. Unknown repos get a generic spec via `for_hf_repo` — never
+/// Qwen3's instruction prefix (t3-css.1.2).
 pub const REGISTRY: &[RegistryEntry] = &[
     RegistryEntry {
         repo: "onnx-community/Qwen3-Embedding-0.6B-ONNX",

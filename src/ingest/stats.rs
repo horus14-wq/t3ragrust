@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 /// Thread-safe skip/read counters shared between a reader iterator and the
 /// pipeline that consumes it. Cheap to clone (Arc internals).
 #[derive(Clone, Default)]
+/// Ingest bookkeeping: `read`/`skipped` counts + a per-reason
+/// histogram printed at index end.
 pub struct SkipStats {
     read: Arc<AtomicU64>,
     skipped: Arc<AtomicU64>,

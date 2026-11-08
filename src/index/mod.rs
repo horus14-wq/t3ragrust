@@ -22,17 +22,22 @@ pub use dense::{DenseBuilder, DenseIndex};
 // --embed-token-budget (4096 — merged-KV exports tile batch x seq^2
 // attention masks; unbounded batches exceed ORT's 4GB tensor limit).
 
-/// `t3rag index` — ingest -> pack -> embed -> usearch+tantivy -> meta.json.
-///
-/// Hostname for provenance records.
+/// Hostname for provenance records (`meta.json.origin`).
 fn hostname() -> String {
     std::fs::read_to_string("/etc/hostname")
         .map(|s| s.trim().to_string())
         .unwrap_or_else(|_| "unknown".into())
 }
 
+/// `t3rag index` — ingest -> pack -> embed -> usearch+tantivy -> meta.json.
+///
 /// Builds into `<name>.build-<ts>` then renames into place; a previous corpus
 /// is rotated to `<name>.replaced-<ts>` (nothing is deleted).
+///
+/// # Errors
+/// The input cannot be opened, the embedder fails to load/download, or
+/// index construction fails partway (the build dir is left in place for
+/// inspection — it is not installed).
 pub fn run_index(args: IndexArgs) -> Result<()> {
     let t0 = Instant::now();
     let (iter, kind, stats) = ingest::open(&args.input, args.text_col.as_deref())?;
@@ -70,6 +75,17 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     // dims (re-normalized); query vectors truncate the same way.
     let store_dims = args.dims.unwrap_or_else(|| emb.dims());
     let mut dense = DenseBuilder::create(&build_dir, store_dims, args.quantization)?;
+
+    // Sparse leg (t3-css.4.3): SPLADE alongside dense when --sparse.
+    let mut sparse_sink: Option<SparseSink> = None;
+    #[cfg(feature = "sparse")]
+    if args.sparse {
+        sparse_sink = Some(SparseSink::new(&build_dir)?);
+    }
+    #[cfg(not(feature = "sparse"))]
+    if args.sparse {
+        bail!("--sparse requires building with --features sparse");
+    }
 
     let mut next_id = 0u64;
     let mut batch: Vec<(u64, String)> = Vec::with_capacity(args.embed_batch);
@@ -123,7 +139,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
                     && (batch.len() == args.embed_batch
                         || batch_tokens + est > args.embed_token_budget)
                 {
-                    flush_batch(&emb, &mut dense, &mut batch, store_dims)?;
+                    flush_batch(&emb, &mut dense, &mut batch, store_dims, &mut sparse_sink)?;
                     batch_tokens = 0;
                 }
                 batch_tokens += est;
@@ -140,7 +156,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         if !batch.is_empty()
             && (batch.len() == args.embed_batch || batch_tokens + est > args.embed_token_budget)
         {
-            flush_batch(&emb, &mut dense, &mut batch, store_dims)?;
+            flush_batch(&emb, &mut dense, &mut batch, store_dims, &mut sparse_sink)?;
             batch_tokens = 0;
             if next_id % 1024 < args.embed_batch as u64 {
                 info!(docs = next_id, stats = %stats, "indexing");
@@ -149,7 +165,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         batch_tokens += est;
         batch.push((p.id, p.text));
     }
-    flush_batch(&emb, &mut dense, &mut batch, store_dims)?;
+    flush_batch(&emb, &mut dense, &mut batch, store_dims, &mut sparse_sink)?;
     if chunked > 0 {
         info!(chunked_parents = chunked, "structural chunking applied");
     }
@@ -215,11 +231,17 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "sparse")]
+use crate::sparse::SparseSink;
+#[cfg(not(feature = "sparse"))]
+struct SparseSink; // never instantiated (feature-gated use only)
+
 fn flush_batch(
     emb: &EmbedderPool,
     dense: &mut DenseBuilder,
     batch: &mut Vec<(u64, String)>,
     store_dims: usize,
+    #[allow(unused_variables)] sparse_sink: &mut Option<SparseSink>,
 ) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
@@ -228,6 +250,10 @@ fn flush_batch(
     // text for the embed call; `&str` references cost nothing.
     let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
     let vecs = emb.embed_passages(&texts)?;
+    #[cfg(feature = "sparse")]
+    if let Some(sink) = sparse_sink {
+        sink.write_batch(batch.iter().map(|(i, t)| (*i, t.as_str())))?;
+    }
     for ((id, _), v) in batch.drain(..).zip(vecs) {
         let v = crate::search::truncate_unit(&v, store_dims);
         dense.add(id, &v)?;

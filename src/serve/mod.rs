@@ -37,6 +37,9 @@ use crate::store::{self, CorpusMeta, PassageReader};
 /// A resident, queryable corpus.
 struct Corpus {
     meta: CorpusMeta,
+    /// Corpus dir — read only by the sparse leg (t3-css.4.3).
+    #[allow(dead_code)]
+    dir: std::path::PathBuf,
     dense: DenseIndex,
     lex: Bm25Index,
     reader: PassageReader,
@@ -98,6 +101,9 @@ struct DaemonState {
     token: Option<String>,
     /// Total handled requests (metrics).
     requests: std::sync::atomic::AtomicU64,
+    /// Lazy SPLADE engine for the sparse leg (t3-css.4.3).
+    #[cfg(feature = "sparse")]
+    sparse_engine: Mutex<Option<crate::sparse::SparseEngine>>,
     started: Instant,
     last_used: Mutex<Instant>,
 }
@@ -125,6 +131,9 @@ struct SearchRequest {
     rerank_candidates: Option<usize>,
     /// Search ergonomics (t3-css.3.4): post-filter `key~substr`,
     /// per-source diversity cap, text truncation, score floor, pagination.
+    /// Third RRF leg: learned sparse (SPLADE) if the corpus has sparse.bin.
+    #[allow(dead_code)]
+    sparse: Option<bool>,
     filter: Option<Vec<String>>,
     max_per_source: Option<usize>,
     max_chars: Option<usize>,
@@ -197,6 +206,7 @@ impl DaemonState {
             dense: DenseIndex::view(&dir, meta.dims as usize, quant)?,
             lex: Bm25Index::open(&dir)?,
             reader: PassageReader::open(&dir)?,
+            dir,
             meta,
         });
         self.corpora
@@ -208,8 +218,9 @@ impl DaemonState {
     }
 }
 
-/// Resolve `--corpus` to a list: comma-separated names or `all`
-/// (t3-css.3.4). Single-corpus hits the same code path unchanged.
+/// Resolve a `--corpus` spec to concrete corpora (t3-css.3.4):
+/// `None`/empty -> newest, `all` -> every indexed corpus, comma-list ->
+/// each named corpus (each `Arc`-cached by [`DaemonState::corpus`]).
 fn resolve_corpora(st: &DaemonState, spec: Option<&str>) -> Result<Vec<(String, Arc<Corpus>)>> {
     let names: Vec<String> = match spec.map(str::trim) {
         None | Some("") => vec![newest_corpus(&st.corpora_root)?],
@@ -219,7 +230,8 @@ fn resolve_corpora(st: &DaemonState, spec: Option<&str>) -> Result<Vec<(String, 
     names.iter().map(|n| st.corpus(Some(n))).collect()
 }
 
-/// Every indexed corpus under the root (sorted for determinism).
+/// Every indexed corpus under `root` (sorted, deterministic): a dir
+/// counts iff it has `meta.json`. Used by `--corpus all`.
 fn all_corpora(root: &std::path::Path) -> Result<Vec<String>> {
     let mut names: Vec<String> = std::fs::read_dir(root)
         .with_context(|| format!("read {}", root.display()))?
@@ -231,6 +243,11 @@ fn all_corpora(root: &std::path::Path) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// Name of the most recently indexed corpus (the `--corpus` default);
+/// uses `meta.json` mtime — `state.json` tracking is the 4.7 follow-up.
+///
+/// # Errors
+/// The corpora root cannot be read, or no corpus exists.
 pub fn newest_corpus(root: &std::path::Path) -> Result<String> {
     let mut best: Option<(std::time::SystemTime, String)> = None;
     for e in std::fs::read_dir(root)
@@ -249,6 +266,10 @@ pub fn newest_corpus(root: &std::path::Path) -> Result<String> {
 }
 
 /// `t3rag serve` — blocks until shutdown/idle-timeout.
+/// `t3rag serve` entry: build the tokio runtime and run [`serve`].
+///
+/// # Errors
+/// The runtime fails to build or [`serve`] errors on startup.
 pub fn run_serve(args: ServeArgs) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -258,6 +279,9 @@ pub fn run_serve(args: ServeArgs) -> Result<()> {
     rt.block_on(async move { serve(args).await })
 }
 
+/// Daemon body: load the embedder (plus any `--corpus` preloads),
+/// bind the router, write `daemon.json` for discovery, and serve until
+/// ctrl-c or `--idle-timeout`.
 async fn serve(args: ServeArgs) -> Result<()> {
     let mut spec = embed::resolve_model(args.model.as_deref());
     if let Some(i) = &args.instruction {
@@ -284,6 +308,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         threads: args.threads,
         token: args.token.clone(),
         requests: std::sync::atomic::AtomicU64::new(0),
+        #[cfg(feature = "sparse")]
+        sparse_engine: Mutex::new(None),
         started: Instant::now(),
         last_used: Mutex::new(Instant::now()),
     });
@@ -371,6 +397,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
     Ok(())
 }
 
+/// `GET /health` — liveness for spawn/discovery probes; stays
+/// unauthenticated even under `--token`.
 async fn health(State(st): State<Arc<DaemonState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "ok": true,
@@ -379,6 +407,7 @@ async fn health(State(st): State<Arc<DaemonState>>) -> impl IntoResponse {
     }))
 }
 
+/// `GET /corpora` — names of corpora loaded in memory (not a disk scan).
 async fn list_corpora(State(st): State<Arc<DaemonState>>) -> impl IntoResponse {
     let mut out = Vec::new();
     let mut names: Vec<String> = Vec::new();
@@ -420,6 +449,7 @@ async fn search(
     }
 }
 
+/// 400 + JSON `{"error": msg}` for search failures.
 fn err_response(msg: String) -> axum::response::Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -430,6 +460,10 @@ fn err_response(msg: String) -> axum::response::Response {
 
 /// Shared query path: embed -> ANN + BM25 -> RRF -> optional rerank ->
 /// hydrate+dedupe by parent.
+/// The shared search pipeline used by `/search` and the `/mcp` tool:
+/// embed (LRU-cached) -> per-corpus ANN + BM25 + optional sparse legs ->
+/// RRF merge -> optional cross-encoder -> parent hydration + dedupe ->
+/// filters/diversity/truncation/pagination (t3-css.3.4).
 fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchResponse<'a>> {
     // A model override only works if the daemon loaded that model —
     // otherwise the client must take the cold path.
@@ -504,14 +538,60 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         bm25_ms += t_bm.elapsed().as_secs_f64() * 1000.0;
         let ann_map: rustc_hash::FxHashMap<u64, f32> = ann.iter().cloned().collect();
         let bm_map: rustc_hash::FxHashMap<u64, f32> = bm.iter().cloned().collect();
-        let fused = rrf_fuse(
-            &[ann, bm],
-            req.rrf_k.unwrap_or(crate::search::RRF_K),
-            &[
-                req.dense_weight.unwrap_or(1.0),
-                req.bm25_weight.unwrap_or(1.0),
-            ],
-        );
+        // Third leg (t3-css.4.3): SPLADE when requested + sparse.bin exists.
+        #[cfg(feature = "sparse")]
+        let sparse_leg: Vec<(u64, f32)> = if req.sparse == Some(true) {
+            let sp_file = crate::sparse::sparse_file(&corpus.dir);
+            if sp_file.exists() {
+                let mut g = st.sparse_engine.lock().unwrap();
+                if g.is_none() {
+                    *g = crate::sparse::SparseEngine::load().ok();
+                }
+                match g.as_mut() {
+                    Some(e) => {
+                        let docs = crate::sparse::read_sparse(&sp_file).unwrap_or_default();
+                        let qv = e
+                            .embed(&[req.query.as_str()])
+                            .ok()
+                            .and_then(|v| v.into_iter().next());
+                        match qv {
+                            Some(q) => crate::sparse::score(&docs, &q)
+                                .into_iter()
+                                .take(cand)
+                                .collect(),
+                            None => Vec::new(),
+                        }
+                    }
+                    None => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        #[cfg(not(feature = "sparse"))]
+        let sparse_leg: Vec<(u64, f32)> = Vec::new();
+        let fused = if sparse_leg.is_empty() {
+            rrf_fuse(
+                &[ann, bm],
+                req.rrf_k.unwrap_or(crate::search::RRF_K),
+                &[
+                    req.dense_weight.unwrap_or(1.0),
+                    req.bm25_weight.unwrap_or(1.0),
+                ],
+            )
+        } else {
+            rrf_fuse(
+                &[ann, bm, sparse_leg],
+                req.rrf_k.unwrap_or(crate::search::RRF_K),
+                &[
+                    req.dense_weight.unwrap_or(1.0),
+                    req.bm25_weight.unwrap_or(1.0),
+                    1.0,
+                ],
+            )
+        };
         per_corpus.push(CorpusLegs {
             ci,
             dense_map: ann_map,
@@ -684,6 +764,7 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
 }
 
 /// `GET /metrics` — uptime + request counter for monitoring (t3-css.3.7).
+/// `GET /metrics` — uptime + handled-request counter (t3-css.3.7).
 async fn metrics(State(st): State<Arc<DaemonState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "uptime_s": st.started.elapsed().as_secs(),
@@ -727,6 +808,7 @@ async fn mcp_http(
                 max_chars: args["max_chars"].as_u64().map(|v| v as usize),
                 min_score: args["min_score"].as_f64().map(|v| v as f32),
                 offset: args["offset"].as_u64().map(|v| v as usize),
+                sparse: args["sparse"].as_bool(),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))
@@ -741,6 +823,8 @@ async fn mcp_http(
     }
 }
 
+/// Write `daemon.json` {pid, port, base_url} so `t3rag search`/`mcp`
+/// can auto-discover (and auto-spawn) this daemon.
 fn write_daemon_info(port: u16) -> Result<()> {
     let path = paths::corpora_root()?
         .parent()
@@ -755,6 +839,7 @@ fn write_daemon_info(port: u16) -> Result<()> {
 }
 
 /// Path of the daemon discovery file (`~/.cache/t3rag/daemon.json`).
+/// Path to `daemon.json` under the cache root.
 pub fn daemon_info_path() -> Result<std::path::PathBuf> {
     Ok(paths::corpora_root()?
         .parent()
@@ -764,6 +849,9 @@ pub fn daemon_info_path() -> Result<std::path::PathBuf> {
 
 /// Discovery: read the live daemon's base URL if the info file exists and the
 /// pid inside is still running. Returns None to signal "use cold path".
+/// Base URL of a live daemon (from `daemon.json` + `/health`), or
+/// `None` when absent/stale. Never spawns — callers choose whether to
+/// pay the spawn cost.
 pub fn discover_daemon() -> Option<String> {
     let path = daemon_info_path().ok()?;
     let s = std::fs::read_to_string(path).ok()?;
@@ -778,6 +866,11 @@ pub fn discover_daemon() -> Option<String> {
 
 /// Find the daemon, spawning `t3rag serve` if absent; poll for readiness
 /// (model warmup can take ~10-60s on a cold box, longer under load).
+/// [`discover_daemon`] + spawn-on-miss (t3-css.1.3): returns a live
+/// base URL, spawning a detached `t3rag serve` when none is up.
+///
+/// # Errors
+/// The spawn or the 180s readiness wait failed.
 pub fn ensure_daemon() -> Result<String> {
     if let Some(base) = discover_daemon() {
         if ureq::get(&format!("{base}/health")).call().is_ok() {
@@ -789,6 +882,8 @@ pub fn ensure_daemon() -> Result<String> {
 }
 
 /// Spawn `t3rag serve` detached (null stdio — the daemon logs to its own file).
+/// Detach a `t3rag serve` child (current_exe); its log lands in the
+/// cache dir. `ensure_daemon` only calls this after a miss.
 fn spawn_daemon() -> Result<()> {
     let exe = std::env::current_exe().context("current exe")?;
     std::process::Command::new(exe)

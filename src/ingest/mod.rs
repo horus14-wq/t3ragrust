@@ -40,9 +40,13 @@ pub enum InputKind {
     Parquet,
 }
 
-/// Open `input`, auto-detecting the format:
-/// directory -> dir reader; `.parquet` -> parquet; otherwise JSONL.
-/// `text_col` overrides parquet column auto-detection.
+/// Open `input`, auto-detecting the format: directory -> dir reader,
+/// `.parquet` -> parquet (feature-gated), otherwise JSONL. `text_col`
+/// overrides parquet column auto-detection.
+///
+/// # Errors
+/// The input cannot be opened, or its format is unrecognized (or a
+/// `.parquet` without the `parquet` feature).
 ///
 /// Returns the iterator of raw records, the detected kind, and the shared
 /// skip-stats counter (updated as the iterator is consumed).
@@ -80,7 +84,8 @@ pub fn open(input: &Path, text_col: Option<&str>) -> Result<(RawIter, InputKind,
 
 /// Materialize a raw record into a `Passage` with its dense ordinal id.
 /// Returns `None` (and counts a skip) for empty/whitespace text.
-/// Cheap content hash for --dedup (t3-css.2.8): FxHash over the text.
+/// FxHash of a passage's text — the `--dedup` key (t3-css.2.8).
+/// Fast, not cryptographic: exact duplicates only.
 pub fn hash_text(text: &str) -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut h = rustc_hash::FxBuildHasher.build_hasher();
@@ -88,6 +93,8 @@ pub fn hash_text(text: &str) -> u64 {
     h.finish()
 }
 
+/// Materialize a [`RawPassage`] into a [`Passage`] with dense ordinal
+/// `id`. Returns `None` (and counts a skip) for empty/whitespace text.
 pub fn to_passage(raw: RawPassage, id: u64, stats: &SkipStats) -> Option<Passage> {
     if raw.text.trim().is_empty() {
         stats.skip("empty_text");

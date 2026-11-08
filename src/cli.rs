@@ -56,6 +56,7 @@ impl Cli {
     }
 }
 
+/// Top-level subcommands (see each variant for behavior).
 #[derive(Subcommand)]
 pub enum Command {
     /// Build a corpus: read passages, embed, write vector+lexical indexes.
@@ -102,6 +103,7 @@ pub enum Command {
     Selftest,
 }
 
+/// Arguments for `t3rag index`: ingest -> embed -> write indexes.
 #[derive(Args)]
 pub struct IndexArgs {
     /// Corpus input: JSONL file, directory of .md/.txt, or .parquet file.
@@ -148,6 +150,9 @@ pub struct IndexArgs {
     /// Count/ingest only — no embeddings or index writes.
     #[arg(long)]
     pub dry_run: bool,
+    /// Also build a learned sparse (SPLADE) leg — needs --features sparse.
+    #[arg(long)]
+    pub sparse: bool,
     /// ONNX execution provider. `auto` tries every compiled-in EP and
     /// silently falls back to CPU. Non-cpu choices require the matching
     /// cargo feature (ep-cuda / ep-openvino / ep-webgpu).
@@ -161,6 +166,7 @@ pub struct IndexArgs {
     pub threads: usize,
 }
 
+/// Arguments for `t3rag search`/`t3rag ask`.
 #[derive(Args)]
 pub struct SearchArgs {
     /// The query text.
@@ -195,6 +201,9 @@ pub struct SearchArgs {
     /// Disable the cross-encoder reranker.
     #[arg(long, overrides_with = "rerank")]
     pub no_rerank: bool,
+    /// Add the learned sparse (SPLADE) leg when the corpus has sparse.bin.
+    #[arg(long)]
+    pub sparse: bool,
     /// Emit structured JSON instead of human-readable output.
     #[arg(long)]
     pub json: bool,
@@ -260,6 +269,7 @@ pub struct SearchArgs {
     pub threads: usize,
 }
 
+/// Arguments for `t3rag serve` (daemon lifecycle + hardening).
 #[derive(Args)]
 pub struct ServeArgs {
     /// Port to bind.
@@ -304,6 +314,7 @@ pub struct ServeArgs {
     pub threads: usize,
 }
 
+/// Arguments for `t3rag mcp` (stdio MCP proxy).
 #[derive(Args)]
 pub struct McpArgs {
     /// Daemon base URL override (default: discover/auto-spawn).
@@ -311,6 +322,7 @@ pub struct McpArgs {
     pub daemon_url: Option<String>,
 }
 
+/// Arguments for `t3rag eval` (recall@k/MRR/nDCG over a queries file).
 #[derive(Args)]
 pub struct EvalArgs {
     /// Queries file: JSONL of {query, relevant_ids[]}.
@@ -333,6 +345,7 @@ pub struct EvalArgs {
     pub json: bool,
 }
 
+/// Arguments for `t3rag bench` (per-stage latency percentiles).
 #[derive(Args)]
 pub struct BenchArgs {
     /// Query text (one line; bench repeats it — LRU dedupes query embed,
@@ -408,6 +421,7 @@ impl SearchArgs {
     }
 }
 
+/// Arguments for `t3rag stats` (deep corpus inspection).
 #[derive(Args)]
 pub struct StatsArgs {
     /// Corpus name (default: newest).
@@ -415,6 +429,7 @@ pub struct StatsArgs {
     pub corpus: Option<String>,
 }
 
+/// Arguments for `t3rag export` (corpus -> JSONL round-trip).
 #[derive(Args)]
 pub struct ExportArgs {
     /// Corpus name (default: newest).
@@ -425,6 +440,7 @@ pub struct ExportArgs {
     pub out: PathBuf,
 }
 
+/// Arguments for `t3rag skill` (SKILL.md emit/install/uninstall).
 #[derive(Args)]
 pub struct SkillArgs {
     /// Write SKILL.md into this directory instead of printing.

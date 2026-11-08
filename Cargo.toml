@@ -30,6 +30,7 @@ postcard = { version = "1", features = ["alloc"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
 ureq = { version = "3", default-features = false, features = ["json"] }
 axum = { version = "0.8", features = ["json"] }
+fastembed = { version = "7.6.1", features = ["onnx", "hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"], optional = true }
 
 # Execution-provider build variants. ort-sys ships ONE binary flavor per
 # build — enable at most one ep-* feature at a time (e.g.
@@ -38,10 +39,13 @@ axum = { version = "0.8", features = ["json"] }
 [features]
 default = ["parquet"]
 parquet = ["dep:parquet", "dep:arrow"]
+# Learned sparse leg (SPLADE) — pulls fastembed + a second ort runtime.
+sparse = ["dep:fastembed"]
 ep-cuda = ["ort/cuda", "ort/tensorrt"]
 ep-openvino = ["ort/openvino"]
 ep-webgpu = ["ort/webgpu"]
 ep-coreml = ["ort/coreml"]
+fastembed = ["dep:fastembed"]
 
 [profile.release]
 lto = "thin"

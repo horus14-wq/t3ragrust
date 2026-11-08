@@ -8,6 +8,9 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+/// `--config` TOML values: flag defaults merged into `Option<>`
+/// args only (scalar flags can't distinguish absent-from-default,
+/// t3-css.3.1). Flags win over config.
 #[derive(Deserialize, Default)]
 pub struct Config {
     pub corpus: Option<String>,
@@ -16,6 +19,10 @@ pub struct Config {
     pub instruction: Option<String>,
 }
 
+/// Load `--config` TOML; `None`/`missing` yields the defaults.
+///
+/// # Errors
+/// The file cannot be read or its TOML is invalid.
 pub fn load(path: Option<&Path>) -> Result<Config> {
     let Some(p) = path else {
         return Ok(Config::default());

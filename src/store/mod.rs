@@ -42,7 +42,10 @@ pub struct CorpusMeta {
     pub index_params: Option<serde_json::Value>,
 }
 
-/// Write `meta.json` into a corpus dir (fsync'd).
+/// Serialize `meta` to `<dir>/meta.json` (pretty-printed).
+///
+/// # Errors
+/// The directory does not exist, or the write fails.
 pub fn write_meta(dir: &std::path::Path, meta: &CorpusMeta) -> anyhow::Result<()> {
     let path = dir.join("meta.json");
     let s = serde_json::to_string_pretty(meta)?;
@@ -50,7 +53,12 @@ pub fn write_meta(dir: &std::path::Path, meta: &CorpusMeta) -> anyhow::Result<()
     Ok(())
 }
 
-/// Read + validate `meta.json`; refuses newer format_version.
+/// Read + validate `<dir>/meta.json`, refusing `format_version`s
+/// newer than [`FORMAT_VERSION`] (older ones parse via `Option`
+/// defaults — no migration shim).
+///
+/// # Errors
+/// The file is missing/unparseable, or declares a newer format.
 pub fn read_meta(dir: &std::path::Path) -> anyhow::Result<CorpusMeta> {
     let path = dir.join("meta.json");
     let s = std::fs::read_to_string(&path)

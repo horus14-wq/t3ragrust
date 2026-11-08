@@ -14,16 +14,23 @@ pub const CHUNK_TRIGGER_EST_TOKENS: usize = 7000;
 /// the 4K-token embed batch budget interplay).
 pub const CHUNK_TARGET_CHARS: usize = 15_000;
 
+/// Cheap token estimate (~3 chars/token) for budget checks — real
+/// token counts need the embedder's tokenizer (a 2.8 follow-up).
 pub fn est_tokens(text: &str) -> usize {
     text.len() / 3
 }
 
+/// Whether `text` should be structurally chunked for retrieval
+/// (rough token estimate over the chunk threshold).
 pub fn needs_chunk(text: &str) -> bool {
     est_tokens(text) > CHUNK_TRIGGER_EST_TOKENS
 }
 
 /// Split `text` into structurally-bounded chunks of roughly
 /// CHUNK_TARGET_CHARS each. Always returns ≥1 chunk.
+/// Split `text` into retrievable chunks on structural boundaries
+/// (paragraphs/sections), each under the token budget. Parents are
+/// stored un-embedded and hydrated at query time (t3-wkp.11).
 pub fn split(text: &str) -> Vec<String> {
     if !needs_chunk(text) {
         return vec![text.to_string()];

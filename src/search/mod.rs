@@ -1,7 +1,7 @@
 //! Query pipeline (t3-wkp.9; rerank .10 / thin-client .13 / presets .16 next).
 //!
 //! embed_query -> usearch ANN (top ~N) + tantivy BM25 (top ~N) -> RRF fusion
-//! -> [rerank] -> hydrate top-k passages from the store. `--no-daemon` is
+//! -> rerank -> hydrate top-k passages from the store. `--no-daemon` is
 //! the only mode for now — this IS the cold in-process path the daemon and
 //! thin client will share.
 
@@ -17,20 +17,35 @@ use crate::index::{Bm25Index, DenseIndex};
 use crate::paths;
 use crate::store::{self, PassageReader};
 
-/// RRF constant (standard k=60).
+/// Default RRF fusion constant `k` — the Cormack-RRF standard.
+/// `--rrf-k` overrides it per query (t3-css.2.5).
 pub const RRF_K: f32 = 60.0;
 
+/// One cold-path result: the parent-hydrated passage plus its fused
+/// (or reranked) score. Mirrors the daemon's `HitOut`.
 pub struct Hit {
+    /// Passage id within the corpus.
     pub passage_id: u64,
+    /// Fused RRF score, or the cross-encoder logit when reranked.
     pub score: f32,
+    /// Passage text (truncated by `--max-chars` when set).
     pub text: String,
+    /// Optional title/source/question metadata from ingest.
     pub title: Option<String>,
+    /// The ingested `question` field, when present.
     pub question: Option<String>,
+    /// The ingested `source` path/id, when present.
     pub source: Option<String>,
 }
 
 /// Truncate a unit vector to MRL `dims` and re-normalize (t3-css.2.4).
-/// Full-length input is returned as a clone; over-length is sliced+renormed.
+///
+/// Matryoshka embeddings keep quality in leading dims; `dims >= len`
+/// returns a plain clone. This is what makes `--dims` honest: both index
+/// and query vectors truncate identically.
+///
+/// # Panics
+/// Never — but an all-zero slice returns unnormalized (a valid degenerate).
 pub fn truncate_unit(v: &[f32], dims: usize) -> Vec<f32> {
     if v.len() <= dims {
         return v.to_vec();
@@ -43,9 +58,15 @@ pub fn truncate_unit(v: &[f32], dims: usize) -> Vec<f32> {
     t.iter().map(|x| x / norm).collect()
 }
 
-/// Fuse ranked legs by weighted reciprocal rank (t3-css.2.5):
-/// score(d) = Σ w_leg/(rrf_k + rank_i(d)). `weights[i]` scales leg i's
-/// contribution (1.0 = equal); `rrf_k` is the standard k (60 default).
+/// Fuse ranked legs by weighted reciprocal rank (t3-css.2.5).
+///
+/// `score(d) = Σ_legs w_leg / (rrf_k + 1 + rank_in_leg)` — ranks are
+/// 0-based so `k+1` is the usual formulation. Legs may be disjoint;
+/// empty legs contribute nothing (sparse/absent legs just don't add).
+///
+/// # Panics
+/// `weights` shorter than `legs` indexes out of bounds — always pass
+/// one weight per leg.
 pub fn rrf_fuse(legs: &[Vec<(u64, f32)>], rrf_k: f32, weights: &[f32]) -> Vec<(u64, f32)> {
     let mut acc: FxHashMap<u64, f32> = FxHashMap::default();
     for (li, leg) in legs.iter().enumerate() {
@@ -93,9 +114,14 @@ fn resolve_preset(args: &SearchArgs) -> (Option<String>, bool, usize) {
     )
 }
 
-/// `t3rag search` entry point — thin-client daemon path first (t3-wkp.13),
-/// falling back to the cold in-process path when no daemon is discoverable
-/// (or it errors), unless `--no-daemon` forces cold.
+/// `t3rag search`/`ask` entry: thin-client daemon path first (t3-wkp.13),
+/// cold in-process path as fallback. `--no-daemon`/`--daemon` control
+/// which runs; `--format` picks the renderer (text/json/jsonl/toon/md/
+/// prompt — `ask` forces `prompt`).
+///
+/// # Errors
+/// Model/index load fails on the cold path, or the daemon errors on
+/// the thin path (when a daemon exists).
 pub fn run_search(args: SearchArgs) -> Result<()> {
     let mode = if args.no_daemon {
         crate::cli::DaemonMode::Never
@@ -139,6 +165,11 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
 }
 
 /// Thin client: POST the query to the resident daemon (t3-wkp.13).
+/// Builds the `SearchRequest` JSON from `SearchArgs`, forwarding every
+/// flag (exact/preset/explain/ef/rrf/reranker/ergonomics/sparse).
+///
+/// # Errors
+/// The daemon returns non-200 or the body is unparseable.
 fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
     let (model, rerank, candidates) = resolve_preset(args);
     let preset = if args.fast {
@@ -172,6 +203,7 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "max_chars": args.max_chars,
             "min_score": args.min_score,
             "offset": args.offset,
+            "sparse": args.sparse,
         }))
         .context("daemon POST /search")?;
     if resp.status().as_u16() != 200 {

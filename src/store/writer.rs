@@ -16,6 +16,7 @@ use crate::passage::Passage;
 
 /// Streams passages into `passages.bin` / `passages.idx` inside `dir`.
 /// Holds no corpus data in memory — each record is serialized and flushed.
+/// Build-time writer for `passages.bin`/`passages.idx`/`vectors.raw.f32`.
 pub struct PassageWriter {
     bin: BufWriter<File>,
     idx: BufWriter<File>,
@@ -24,6 +25,10 @@ pub struct PassageWriter {
 }
 
 impl PassageWriter {
+    /// Create fresh store files under `dir`.
+    ///
+    /// # Errors
+    /// Any of the three artifact files cannot be created.
     pub fn create(dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(dir)
             .with_context(|| format!("create corpus dir {}", dir.display()))?;
@@ -45,6 +50,10 @@ impl PassageWriter {
 
     /// Append one passage. `passage.id` must equal the ordinal write position
     /// (0,1,2,...) so the idx stays a plain offset table.
+    /// Append a passage (postcard + index entry + raw vector slot).
+    ///
+    /// # Errors
+    /// Serialization or write fails.
     pub fn push(&mut self, passage: &Passage) -> Result<()> {
         if passage.id != self.next_id {
             bail!(
@@ -66,6 +75,10 @@ impl PassageWriter {
     /// Flush both files and fsync. Returns the number of records written.
     /// Dropping without `finish` leaves the corpus incomplete (missing idx
     /// tail is detectable on open).
+    /// Flush + return the stored doc count.
+    ///
+    /// # Errors
+    /// The index or raw-vector header fails to write.
     pub fn finish(mut self) -> Result<u64> {
         self.bin.flush()?;
         self.idx.flush()?;

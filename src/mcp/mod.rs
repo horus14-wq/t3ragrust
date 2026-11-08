@@ -50,6 +50,7 @@ fn tools_list() -> Value {
                     "max_per_source": {"type": "integer", "description": "cap hits per source (episode-diversity)"},
                     "max_chars": {"type": "integer", "description": "truncate passage text"},
                     "min_score": {"type": "number", "description": "drop hits below score"},
+                    "sparse": {"type": "boolean", "default": false, "description": "add the learned SPLADE leg (corpus must have sparse.bin)"},
                     "rerank_candidates": {"type": "integer", "description": "candidates fed to reranker"},
                     "preset": {"type": "string", "enum": ["fast", "balanced", "max"], "description": "quality preset (sets candidates/rerank defaults)"},
                     "model": {"type": "string", "description": "embedding model repo override (must match the daemon's)"}
@@ -61,7 +62,11 @@ fn tools_list() -> Value {
 }
 
 /// Dispatch one JSON-RPC message through `exec` (the search executor).
-/// Returns a response message, or None for notifications.
+/// Returns a response, or `None` for notifications (no `id`).
+///
+/// Implements `initialize`, `notifications/*`, `ping`, `tools/list`,
+/// `tools/call`; everything else gets `-32601` (honest tools-only
+/// surface, t3-css.3.6).
 pub fn handle_rpc(msg: &Value, exec: &dyn Fn(&Value) -> Result<Value>) -> Option<Value> {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
@@ -108,7 +113,8 @@ pub fn handle_rpc(msg: &Value, exec: &dyn Fn(&Value) -> Result<Value>) -> Option
     }
 }
 
-/// Render daemon search results into an MCP tool response.
+/// Render daemon search results into the MCP `content` shape
+/// (`text` blocks per hit).
 pub fn tool_response(resp: &Value) -> Value {
     let mut text = String::new();
     if let Some(results) = resp.get("results").and_then(Value::as_array) {
@@ -137,6 +143,11 @@ pub fn tool_response(resp: &Value) -> Value {
 // ---------------- stdio proxy ----------------
 
 /// `t3rag mcp` — newline-delimited JSON-RPC on stdin/stdout.
+/// `t3rag mcp`: stdio MCP server that proxies each `tools/call` to
+/// the running daemon via HTTP — never loads models itself.
+///
+/// # Errors
+/// A line is unreadable, or a proxied daemon query fails.
 pub fn run_mcp(args: McpArgs) -> Result<()> {
     let base = match args.daemon_url.as_deref() {
         Some(u) => u.to_string(),

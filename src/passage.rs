@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 /// passages carry `parent_id == passage_id` and `chunk_idx == 0`; chunks point
 /// at their source passage and hydrate back to it at query time.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+/// One retrievable unit: dense ordinal `id`, `text`, optional
+/// metadata, and the chunk hierarchy fields (`parent_id`/`chunk_idx` —
+/// unchunked passages point at themselves).
 pub struct Passage {
     /// Ordinal id within the corpus (dense, aligned with index keys).
     pub id: u64,

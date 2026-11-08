@@ -105,6 +105,9 @@ const PAD_ID: u32 = 151643;
 /// One loaded embedding model: ONNX session + tokenizer. Not `Sync`-safe to
 /// call concurrently (ORT `run` takes `&mut self`) — the daemon/session pool
 /// clones or wraps instances behind a semaphore.
+/// A loaded ONNX embedding session: tokenizer + ORT session +
+/// declared-input feeding (registry instructions, generic extra
+/// inputs). Not `Sync` — pooled behind [`crate::embed::EmbedderPool`].
 pub struct Embedder {
     session: Session,
     tokenizer: Tokenizer,
@@ -346,8 +349,13 @@ fn l2_normalize(v: &mut [f32]) {
     }
 }
 
-/// Fetch the ONNX model + tokenizer from HF, trying candidate export names
-/// in order. Returns local cache paths.
+/// Fetch the ONNX model + tokenizer from HF, trying candidate export
+/// names in order (onnx/ subdir first, root-level fallback), plus the
+/// `<file>_data` external-weights sibling when the export needs one
+/// (t3-css.1.1).
+///
+/// # Errors
+/// No usable ONNX export exists, or the tokenizer cannot be fetched.
 pub(crate) fn fetch_files(spec: &ModelSpec) -> Result<(PathBuf, PathBuf)> {
     // hf-hub 1.x HFClient (t3-css.4.8): Xet dedup transfers when the repo
     // is Xet-enabled; `blocking` sync surface keeps callers unchanged.

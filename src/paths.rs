@@ -16,12 +16,14 @@ pub fn cache_root() -> Result<PathBuf> {
 }
 
 /// Directory holding every indexed corpus artifact.
+/// Directory holding every indexed corpus artifact (`<cache>/corpora`).
 pub fn corpora_root() -> Result<PathBuf> {
     Ok(cache_root()?.join("corpora"))
 }
 
 /// Artifact dir for one named corpus: passages.bin/.idx, vectors.usearch,
 /// bm25/, meta.json.
+/// `<corpora_root>/<name>` — the artifact dir for corpus `name`.
 pub fn corpus_dir(name: &str) -> Result<PathBuf> {
     Ok(corpora_root()?.join(name))
 }

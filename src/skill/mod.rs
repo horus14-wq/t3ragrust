@@ -89,8 +89,9 @@ emits `{query, corpus, results:[{rank,passage_id,score,text,title,
 question,source}]}`.
 "##;
 
-/// `t3rag skill` entry point: print or install the SKILL.md wrapper.
-/// Spec layout: `<skills-dir>/t3rag/SKILL.md` (a bare `SKILL.md` in the
+/// `t3rag skill` entry point: print, install, or uninstall the
+/// SKILL.md wrapper. Spec layout: `<skills-dir>/t3rag/SKILL.md` — the
+/// bare `SKILL.md`-at-root form is what spec-loaders reject.
 /// skills root is ignored by spec-compliant loaders).
 pub fn run_skill(args: SkillArgs) -> Result<()> {
     let target = match (args.install.as_ref(), args.agents) {
@@ -139,8 +140,9 @@ fn install(dir: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
-/// Guardrailed uninstall (t3-css.3.8): removes only `<skills-dir>/t3rag/`,
-/// prints the exact path, requires --yes.
+/// Guardrailed uninstall (t3-css.3.8): prints the exact target,
+/// requires `--yes`, removes only `<skills-dir>/t3rag/` — never the
+/// skills dir itself, never outside it.
 fn uninstall(dir: &Path, yes: bool) -> Result<()> {
     let skill_dir = dir.join("t3rag");
     if !skill_dir.join("SKILL.md").exists() {

@@ -8,6 +8,12 @@ use anyhow::{Context, Result};
 
 use crate::cli::BenchArgs;
 
+/// `t3rag bench`: p50/p95/p99 + mean per stage over `--iters`
+/// queries through the daemon (`--explain` instrumentation), plus
+/// `--cold` spawn-time measurement (t3-css.2.2).
+///
+/// # Errors
+/// No daemon reachable, or a query fails.
 pub fn run_bench(args: BenchArgs) -> Result<()> {
     let base = crate::serve::ensure_daemon()?;
     let corpus = match args.corpus.first() {

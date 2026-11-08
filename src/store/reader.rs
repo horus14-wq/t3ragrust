@@ -9,6 +9,8 @@ use crate::passage::Passage;
 
 /// Read-only view over `passages.bin` + `passages.idx`. Both files are mapped
 /// whole — warm state is page cache, no heap copies.
+/// Read-side handle over `passages.bin`/`passages.idx`: `get(id)`
+/// deserializes the postcard record at the indexed offset.
 pub struct PassageReader {
     bin: Mmap,
     idx: Mmap,
@@ -18,6 +20,10 @@ impl PassageReader {
     /// Map the store in `dir`. Fails cleanly on missing/corrupt files:
     /// the idx must be a whole number of u64 entries and the last recorded
     /// offset must land inside bin (catches truncated builds at open).
+    /// Open the passage store under `dir`.
+    ///
+    /// # Errors
+    /// `passages.bin`/`passages.idx` are missing or unparseable.
     pub fn open(dir: &Path) -> Result<Self> {
         let bin_path = dir.join("passages.bin");
         let idx_path = dir.join("passages.idx");
@@ -60,11 +66,17 @@ impl PassageReader {
     }
 
     /// Number of stored passages.
+    /// Number of stored passages.
     pub fn len(&self) -> u64 {
         (self.idx.len() / 8) as u64
     }
 
     /// Fetch passage `id` in O(1). Requires dense ids (writer-enforced).
+    /// Fetch passage `id` (the dense ordinal — chunks map to their
+    /// parent on hydrate).
+    ///
+    /// # Errors
+    /// `id` out of range, or the record fails to deserialize.
     pub fn get(&self, id: u64) -> Result<Passage> {
         if id >= self.len() {
             bail!("passage id {id} out of range ({} stored)", self.len());

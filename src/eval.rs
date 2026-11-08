@@ -29,6 +29,13 @@ struct Metrics {
     ndcg10: f64,
 }
 
+/// `t3rag eval`: run a queries file `{query, relevant_ids[]}`
+/// through the daemon and report recall@1/3/5/10, MRR, nDCG@10 —
+/// per corpus when `--corpus` lists several (A/B), with `--exact` as
+/// the ANN recall audit (t3-css.2.3).
+///
+/// # Errors
+/// The queries file cannot be read, or a corpus query fails.
 pub fn run_eval(args: EvalArgs) -> Result<()> {
     let queries = read_queries(&args.queries)?;
     if queries.is_empty() {
