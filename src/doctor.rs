@@ -42,22 +42,31 @@ pub fn run_list() -> Result<()> {
         "{:<18} {:<8} {:>7} {:>5} {:>9}  {:<44} {:>9}",
         "corpus", "type", "docs", "dims", "size", "model", "mtime"
     );
+    let mut any_stale = false;
     for (name, meta, size, mtime) in &rows {
         let ty = meta
             .manifest
             .as_ref()
             .map(|m| m.transform.as_str())
             .unwrap_or("-");
+        // t3-ao9: "!" marks corpora whose source input is newer than
+        // the index — see `t3rag stats <name>` for the detail.
+        let stale = staleness_note(meta, &root.join(name)).is_some();
+        any_stale |= stale;
         println!(
-            "{:<18} {:<8} {:>7} {:>5} {:>9}  {:<44} {:>9}",
+            "{:<18} {:<8} {:>7} {:>5} {:>9}  {:<44} {:>9}{}",
             name,
             ty,
             meta.doc_count,
             meta.dims,
             human_bytes(*size),
             meta.model,
-            mtime
+            mtime,
+            if stale { " !" } else { "" }
         );
+    }
+    if any_stale {
+        println!("(! = input newer than index — `t3rag stats` for detail)");
     }
     if rows.is_empty() {
         println!("(no corpora — index one with `t3rag index`)");
@@ -143,7 +152,7 @@ pub fn run_stats(name: Option<String>) -> Result<()> {
 /// `t3rag doctor`: environment sanity — SIMD compiled/available,
 /// execution providers, HF cache, model files, corpora, daemon
 /// health, versions, disk.
-pub fn run_doctor() -> Result<()> {
+pub fn run_doctor(deep: bool) -> Result<()> {
     println!("t3rag {}", env!("CARGO_PKG_VERSION"));
     // SIMD paths usearch reports (compiled vs available on this CPU).
     println!(
@@ -212,6 +221,28 @@ pub fn run_doctor() -> Result<()> {
         }
     } else {
         println!("daemon:      not running (auto-spawns on first query)");
+    }
+    // --deep (t3-ao9): verify every corpus — meta/store/vector/BM25
+    // consistency + staleness, same checks as `t3rag verify`.
+    if deep {
+        println!("verify (--deep):");
+        for e in std::fs::read_dir(&root)?.flatten() {
+            let dir = e.path();
+            if dir.is_dir() && dir.join("meta.json").exists() {
+                let name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "?".into());
+                let rep = crate::verify::verify_dir(&name, &dir);
+                let status = if rep.ok() { "PASS" } else { "FAIL" };
+                println!("  {status} {name}");
+                if !rep.ok() {
+                    for c in rep.checks.iter().filter(|c| !c.ok) {
+                        println!("       {}: {}", c.name, c.detail);
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }

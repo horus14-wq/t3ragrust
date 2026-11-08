@@ -141,13 +141,25 @@ pub fn verify_dir(name: &str, dir: &Path) -> VerifyReport {
                 Ok(()) => {
                     let n = u64::from_le_bytes(hdr[0..8].try_into().unwrap());
                     let dims = u64::from_le_bytes(hdr[8..16].try_into().unwrap());
-                    let expect = 16 + n * (8 + dims * 4);
                     let actual = f.metadata().map(|m| m.len()).unwrap_or(0);
-                    let ok = dims == meta.dims as u64 && actual == expect;
+                    // Record layout differs by format version (dense.rs):
+                    // v1 = bare f32 rows, v2 = [u64 id][f32 vec]. Accept
+                    // either — same rule as `DenseIndex::exact_search`.
+                    let v1 = 16 + n * (dims * 4);
+                    let v2 = 16 + n * (8 + dims * 4);
+                    let (ok, layout) = if actual == v2 {
+                        (dims == meta.dims as u64, "v2")
+                    } else if actual == v1 {
+                        (dims == meta.dims as u64, "v1")
+                    } else {
+                        (false, "?")
+                    };
                     checks.push(Check {
                         name: "vectors.raw.f32",
                         ok,
-                        detail: format!("n={n} dims={dims} size={actual} (expect {expect})"),
+                        detail: format!(
+                            "n={n} dims={dims} size={actual} layout={layout} (v1={v1} v2={v2})"
+                        ),
                     });
                 }
                 Err(e) => checks.push(Check {
