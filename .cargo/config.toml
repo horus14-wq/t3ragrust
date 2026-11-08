@@ -5,3 +5,8 @@
 # toolchain (as well as any stable rch build).
 [target.x86_64-unknown-linux-gnu]
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+
+# mold is multi-arch; same fast-linker treatment on aarch64 Linux
+# (ubuntu-24.04-arm CI leg + ARM dev hosts).
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]

@@ -17,6 +17,12 @@ jobs:
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, flavor: cpu, features: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: cpu, features: "" }
           - { os: macos-14, target: aarch64-apple-darwin, flavor: cpu, features: "" }
+          # aarch64 Linux: ort ships a `none` (cpu) dist for this target
+          # (t3-7hc). cuda13/tensorrt/nvrtx ARM-server dists also exist but
+          # need real ARM GPU hardware to be useful — cpu only for now.
+          # x86_64-apple-darwin (Intel Mac) omitted: no ORT binaries exist
+          # upstream anymore (dropped in ONNX Runtime 1.24).
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, flavor: cpu, features: "" }
           # EP flavors — ort-sys ships one EP per build, so each is a
           # separate artifact rather than a fat binary.
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, flavor: cuda, features: "ep-cuda" }

@@ -14,7 +14,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+        # ubuntu-24.04-arm = GitHub ARM64 runner (billed minutes on private
+        # repos). macos-15-intel intentionally absent: ONNX Runtime >=1.24
+        # ships no x86_64-darwin binaries and ort-sys has no prebuilt dist —
+        # Intel Macs can't link the embedder (t3-7hc).
+        os: [ubuntu-latest, windows-latest, macos-14, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
