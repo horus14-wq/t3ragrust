@@ -68,6 +68,14 @@ pub fn open(input: &Path, text_col: Option<&str>) -> Result<(RawIter, InputKind,
 
 /// Materialize a raw record into a `Passage` with its dense ordinal id.
 /// Returns `None` (and counts a skip) for empty/whitespace text.
+/// Cheap content hash for --dedup (t3-css.2.8): FxHash over the text.
+pub fn hash_text(text: &str) -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = rustc_hash::FxBuildHasher.build_hasher();
+    h.write(text.as_bytes());
+    h.finish()
+}
+
 pub fn to_passage(raw: RawPassage, id: u64, stats: &SkipStats) -> Option<Passage> {
     if raw.text.trim().is_empty() {
         stats.skip("empty_text");

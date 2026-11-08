@@ -18,12 +18,9 @@ use crate::store::{self, CorpusMeta, PassageWriter};
 pub use bm25::{Bm25Builder, Bm25Index};
 pub use dense::{DenseBuilder, DenseIndex};
 
-/// Max passages per embedding batch.
-const EMBED_BATCH: usize = 16;
-/// Token budget per forward pass. The merged-KV ONNX export tiles a
-/// batch x seq^2 attention mask — unbounded batches exceed ORT's 4GB
-/// tensor limit when a long passage is present.
-const EMBED_TOKEN_BUDGET: usize = 4096;
+/// Batch knobs live on `IndexArgs` (t3-css.2.8): --embed-batch (16) and
+/// --embed-token-budget (4096 — merged-KV exports tile batch x seq^2
+/// attention masks; unbounded batches exceed ORT's 4GB tensor limit).
 
 /// `t3rag index` — ingest -> pack -> embed -> usearch+tantivy -> meta.json.
 ///
@@ -33,6 +30,19 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     let t0 = Instant::now();
     let (iter, kind, stats) = ingest::open(&args.input, args.text_col.as_deref())?;
     info!(?kind, input = %args.input.display(), "ingest opened");
+
+    // Dry run (t3-css.2.8): ingest+count only — placed BEFORE the embedder
+    // load so a dry run never downloads a model.
+    if args.dry_run {
+        let mut n = 0u64;
+        for raw in iter {
+            let _ = raw?;
+            n += 1;
+        }
+        info!(docs = n, stats = %stats, "dry run complete");
+        println!("dry run: {n} passages would index ({stats})");
+        return Ok(());
+    }
 
     let mut spec = embed::resolve_model(args.model.as_deref());
     if let Some(i) = &args.instruction {
@@ -55,16 +65,35 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     let mut dense = DenseBuilder::create(&build_dir, store_dims, args.quantization)?;
 
     let mut next_id = 0u64;
-    let mut batch: Vec<(u64, String)> = Vec::with_capacity(EMBED_BATCH);
+    let mut batch: Vec<(u64, String)> = Vec::with_capacity(args.embed_batch);
     let mut batch_tokens = 0usize;
     let mut chunked = 0u64;
+    let mut seen_hashes: rustc_hash::FxHashSet<u64> = Default::default();
     for raw in iter {
         let raw = raw?;
         let Some(mut p) = ingest::to_passage(raw, next_id, &stats) else {
             continue;
         };
 
-        if crate::chunk::needs_chunk(&p.text) {
+        // Ingest filters (t3-css.2.8): char bounds + exact-hash dedup.
+        if let Some(mn) = args.min_chars {
+            if p.text.len() < mn {
+                stats.skip("too_short");
+                continue;
+            }
+        }
+        if let Some(mx) = args.max_chars {
+            if p.text.len() > mx {
+                stats.skip("too_long");
+                continue;
+            }
+        }
+        if args.dedup && !seen_hashes.insert(crate::ingest::hash_text(&p.text)) {
+            stats.skip("duplicate");
+            continue;
+        }
+
+        if crate::chunk::needs_chunk(&p.text) && !args.no_chunk {
             // Structural chunking (t3-wkp.11): store the parent for hydration
             // (no vector, no BM25 doc); index the chunks as retrievable units.
             chunked += 1;
@@ -84,7 +113,8 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
                 lex.add(&p)?;
                 let est = crate::chunk::est_tokens(&p.text).max(1);
                 if !batch.is_empty()
-                    && (batch.len() == EMBED_BATCH || batch_tokens + est > EMBED_TOKEN_BUDGET)
+                    && (batch.len() == args.embed_batch
+                        || batch_tokens + est > args.embed_token_budget)
                 {
                     flush_batch(&emb, &mut dense, &mut batch, store_dims)?;
                     batch_tokens = 0;
@@ -101,11 +131,11 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         // Cheap token estimate (~3 chars/token) for the budget check.
         let est = (p.text.len() / 3).max(1);
         if !batch.is_empty()
-            && (batch.len() == EMBED_BATCH || batch_tokens + est > EMBED_TOKEN_BUDGET)
+            && (batch.len() == args.embed_batch || batch_tokens + est > args.embed_token_budget)
         {
             flush_batch(&emb, &mut dense, &mut batch, store_dims)?;
             batch_tokens = 0;
-            if next_id % 1024 < EMBED_BATCH as u64 {
+            if next_id % 1024 < args.embed_batch as u64 {
                 info!(docs = next_id, stats = %stats, "indexing");
             }
         }

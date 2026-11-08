@@ -120,6 +120,27 @@ pub struct IndexArgs {
     /// Vector quantization for the dense index.
     #[arg(long, value_enum, default_value_t = Quantization::I8, env = "T3RAG_QUANTIZATION")]
     pub quantization: Quantization,
+    /// Docs per embed batch (default 16).
+    #[arg(long, default_value_t = 16)]
+    pub embed_batch: usize,
+    /// Token budget per embed batch (default 4096 — ORT tensor limit).
+    #[arg(long, default_value_t = 4096)]
+    pub embed_token_budget: usize,
+    /// Drop passages shorter than N chars.
+    #[arg(long)]
+    pub min_chars: Option<usize>,
+    /// Drop passages longer than N chars (pre-chunk).
+    #[arg(long)]
+    pub max_chars: Option<usize>,
+    /// Exact-hash dedup by passage text at ingest.
+    #[arg(long)]
+    pub dedup: bool,
+    /// Disable structural chunking (A/B eval control).
+    #[arg(long)]
+    pub no_chunk: bool,
+    /// Count/ingest only — no embeddings or index writes.
+    #[arg(long)]
+    pub dry_run: bool,
     /// ONNX execution provider. `auto` tries every compiled-in EP and
     /// silently falls back to CPU. Non-cpu choices require the matching
     /// cargo feature (ep-cuda / ep-openvino / ep-webgpu).
