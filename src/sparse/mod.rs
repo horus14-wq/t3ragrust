@@ -29,11 +29,22 @@ pub struct SparseEngine {
 impl SparseEngine {
     /// Initialize the engine; first call downloads the model.
     ///
+    /// Shares the process's single ORT environment with the dense
+    /// embedder — a second `ort::init()` would be refused.
+    ///
     /// # Errors
     /// The model cannot be fetched or its session fails to build.
     pub fn load() -> Result<Self> {
-        let inner = SparseTextEmbedding::try_new(SparseInitOptions::new(SparseModel::SPLADEPPV1))
-            .context("load SPLADE sparse embedder")?;
+        let env = (*crate::embed::session::ort_env()?).clone();
+        // Keep fastembed's model cache under T3RAG_HOME — its default is
+        // a cwd-relative ./.fastembed_cache that leaks into any dir the
+        // command runs from (including repo checkouts).
+        let inner = SparseTextEmbedding::try_new(
+            SparseInitOptions::new(SparseModel::SPLADEPPV1)
+                .with_environment(env)
+                .with_cache_dir(crate::paths::cache_root()?.join("fastembed")),
+        )
+        .context("load SPLADE sparse embedder")?;
         Ok(Self { inner })
     }
 

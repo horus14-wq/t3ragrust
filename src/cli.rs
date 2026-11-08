@@ -89,6 +89,10 @@ pub enum Command {
     Models,
     /// Export a corpus back to JSONL (round-trip).
     Export(ExportArgs),
+    /// Upload a corpus to a Hugging Face dataset repo (t3-css.3.9).
+    Publish(PublishArgs),
+    /// Download a published corpus into the local corpora root.
+    Pull(PullArgs),
     /// Generate shell completions.
     Completions {
         #[arg(long, value_enum)]
@@ -344,6 +348,9 @@ pub struct EvalArgs {
     /// Fast preset (no rerank, fewer candidates).
     #[arg(long)]
     pub fast: bool,
+    /// Add the learned sparse (SPLADE) leg when the corpus has sparse.bin.
+    #[arg(long)]
+    pub sparse: bool,
     /// JSON output.
     #[arg(long)]
     pub json: bool,
@@ -442,6 +449,34 @@ pub struct ExportArgs {
     /// Output JSONL path.
     #[arg(long)]
     pub out: PathBuf,
+}
+
+/// Arguments for `t3rag publish` (corpus -> HF dataset repo).
+#[derive(Args)]
+pub struct PublishArgs {
+    /// Corpus name (default: newest).
+    #[arg(long, env = "T3RAG_CORPUS")]
+    pub corpus: Option<String>,
+    /// Target repo, e.g. `owner/name` (a HF dataset repo).
+    #[arg(long)]
+    pub repo: String,
+    /// HF repo type.
+    #[arg(long, default_value = "dataset")]
+    pub repo_type: String,
+}
+
+/// Arguments for `t3rag pull` (HF dataset repo -> local corpus).
+#[derive(Args)]
+pub struct PullArgs {
+    /// Source repo, e.g. `owner/name`.
+    #[arg(long)]
+    pub repo: String,
+    /// Local corpus name (default: repo's last path component).
+    #[arg(long, env = "T3RAG_NAME")]
+    pub name: Option<String>,
+    /// HF repo type.
+    #[arg(long, default_value = "dataset")]
+    pub repo_type: String,
 }
 
 /// Arguments for `t3rag skill` (SKILL.md emit/install/uninstall).

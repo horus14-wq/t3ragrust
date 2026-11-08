@@ -174,6 +174,7 @@ fn search_ids(
             "rerank": args.rerank,
             "exact": args.exact,
             "preset": if args.fast { Some("fast") } else { None },
+            "sparse": args.sparse,
         }))
         .context("daemon POST /search")?;
     if resp.status().as_u16() != 200 {
