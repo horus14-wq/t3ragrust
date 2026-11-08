@@ -24,6 +24,13 @@ pub use dense::{DenseBuilder, DenseIndex};
 
 /// `t3rag index` — ingest -> pack -> embed -> usearch+tantivy -> meta.json.
 ///
+/// Hostname for provenance records.
+fn hostname() -> String {
+    std::fs::read_to_string("/etc/hostname")
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown".into())
+}
+
 /// Builds into `<name>.build-<ts>` then renames into place; a previous corpus
 /// is rotated to `<name>.replaced-<ts>` (nothing is deleted).
 pub fn run_index(args: IndexArgs) -> Result<()> {
@@ -162,6 +169,24 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         dims: store_dims as u32,
         quantization: format!("{:?}", args.quantization).to_lowercase(),
         doc_count: n,
+        // Provenance (t3-css.4.7): created_at + host:user:input origin +
+        // the index-time flags that produced this build.
+        created_at: Some(now_ts().to_string()),
+        origin: Some(format!(
+            "{}:{}:{}",
+            hostname(),
+            std::env::var("USER").unwrap_or_default(),
+            args.input.display()
+        )),
+        instruction: Some(spec.passage_instruction.clone()),
+        index_params: Some(serde_json::json!({
+            "embed_batch": args.embed_batch,
+            "embed_token_budget": args.embed_token_budget,
+            "dims": args.dims,
+            "dedup": args.dedup,
+            "no_chunk": args.no_chunk,
+            "chunked_parents": chunked,
+        })),
     };
     store::write_meta(&build_dir, &meta)?;
 

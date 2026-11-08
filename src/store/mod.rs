@@ -26,6 +26,20 @@ pub struct CorpusMeta {
     pub dims: u32,
     pub quantization: String,
     pub doc_count: u64,
+    // Provenance (t3-css.4.7): corpora self-describe their build so
+    // stats/doctor/eval can compare; Option+default keeps older
+    // metas (written before these fields existed) parseable.
+    #[serde(default)]
+    pub created_at: Option<String>,
+    /// `<host>:<user>:<input-path>` — warns on cross-origin reuse.
+    #[serde(default)]
+    pub origin: Option<String>,
+    /// Passage instruction prefix used at embed time.
+    #[serde(default)]
+    pub instruction: Option<String>,
+    /// Index-time knobs that produced this corpus.
+    #[serde(default)]
+    pub index_params: Option<serde_json::Value>,
 }
 
 /// Write `meta.json` into a corpus dir (fsync'd).
