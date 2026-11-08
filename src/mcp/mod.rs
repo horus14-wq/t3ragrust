@@ -18,7 +18,12 @@ use tracing::info;
 
 use crate::cli::McpArgs;
 
-const PROTOCOL_VERSION: &str = "2024-11-05";
+// MCP spec revision we implement (t3-css.3.6 — decision: keep the
+// hand-rolled tools-only layer for v1, declare it honestly; rmcp is
+// deferred — see bead notes). Negotiation: clients compare our
+// declared version against the requested one in params.protocolVersion
+// and terminate if incompatible — we always state ours.
+const PROTOCOL_VERSION: &str = "2025-06-18";
 
 /// The single tool exposed over MCP.
 fn tools_list() -> Value {
