@@ -57,6 +57,7 @@ impl Cli {
             Command::Publish(args) => crate::capabilities::run_publish(args),
             Command::Pull(args) => crate::capabilities::run_pull(args),
             Command::Show { corpus, id } => crate::capabilities::run_show(corpus, id),
+            Command::Feedback(args) => crate::capabilities::run_feedback(args),
             Command::Completions { shell } => crate::capabilities::run_completions(shell),
             Command::Man { dir } => crate::capabilities::run_man(&dir),
             Command::Selftest => crate::capabilities::run_selftest(),
@@ -113,6 +114,8 @@ pub enum Command {
     Publish(PublishArgs),
     /// Download a published corpus into the local corpora root.
     Pull(PullArgs),
+    /// Record a relevance verdict on a query's hits (t3-bj5).
+    Feedback(FeedbackArgs),
     /// Print one passage in full (no model needed).
     Show {
         /// Corpus name (default: newest).
@@ -544,6 +547,30 @@ pub struct PullArgs {
     /// HF repo type.
     #[arg(long, default_value = "dataset")]
     pub repo_type: String,
+}
+
+/// Verdict on a search hit set (t3-bj5).
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum Verdict {
+    Relevant,
+    Irrelevant,
+}
+
+/// Arguments for `t3rag feedback` — appends to ~/.cache/t3rag/feedback.jsonl.
+#[derive(Args)]
+pub struct FeedbackArgs {
+    /// The query that produced the hits.
+    #[arg(long)]
+    pub query: Option<String>,
+    /// Passage ids the verdict applies to (comma-list).
+    #[arg(long, value_delimiter = ',')]
+    pub ids: Vec<u64>,
+    /// Verdict: relevant | irrelevant.
+    #[arg(long, value_enum)]
+    pub verdict: Verdict,
+    /// Corpus the hits came from.
+    #[arg(long, env = "T3RAG_CORPUS")]
+    pub corpus: Option<String>,
 }
 
 /// Arguments for `t3rag skill` (SKILL.md emit/install/uninstall).

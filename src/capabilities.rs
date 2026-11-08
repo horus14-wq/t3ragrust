@@ -283,6 +283,46 @@ pub fn run_show(corpus: Option<String>, id: u64) -> Result<()> {
     Ok(())
 }
 
+/// `t3rag feedback` — append a relevance verdict to
+/// `~/.cache/t3rag/feedback.jsonl` (t3-bj5): the accretion substrate that
+/// `insights`/`eval --history` aggregate later.
+///
+/// # Errors
+/// The cache root can't be created or the file can't be written.
+pub fn run_feedback(args: crate::cli::FeedbackArgs) -> Result<()> {
+    if args.ids.is_empty() {
+        anyhow::bail!("--ids is required (passage ids the verdict applies to)");
+    }
+    let root = paths::cache_root()?;
+    std::fs::create_dir_all(&root)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(root.join("feedback.jsonl"))?;
+    use std::io::Write;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    writeln!(
+        f,
+        "{}",
+        serde_json::json!({
+            "ts": ts,
+            "query": args.query,
+            "passage_ids": args.ids,
+            "verdict": format!("{:?}", args.verdict).to_lowercase(),
+            "corpus": args.corpus,
+        })
+    )?;
+    println!(
+        "recorded {:?} verdict on {} passage(s)",
+        args.verdict,
+        args.ids.len()
+    );
+    Ok(())
+}
+
 /// `t3rag selftest` — alias-level sanity (same as `health`, plus a clap
 /// parse of the full arg surface so the help tree itself is proven).
 pub fn run_selftest() -> Result<()> {
