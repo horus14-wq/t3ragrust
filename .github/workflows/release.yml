@@ -44,6 +44,16 @@ jobs:
         with:
           key: ${{ matrix.target }}-${{ matrix.flavor }}
 
+      # libort_sys.a embeds CoreML .mm objects on every flavor; they call
+      # __builtin_available -> ___isPlatformVersionAtLeast, which lives in
+      # libclang_rt.osx.a and is not auto-linked under rustc's -nodefaultlibs.
+      - name: clang_rt for ORT __builtin_available (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          RT="$(find "$(xcode-select -p)" -name libclang_rt.osx.a -print -quit)"
+          echo "clang_rt: $RT"
+          echo "RUSTFLAGS=-C link-arg=-L$(dirname "$RT") -C link-arg=-lclang_rt.osx" >> "$GITHUB_ENV"
+
       - name: Install mold linker (Linux only)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y mold
