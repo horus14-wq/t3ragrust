@@ -12,6 +12,36 @@ use anyhow::{Context, Result};
 use super::{Embedder, ModelSpec};
 use crate::cli::Ep;
 
+/// Estimated resident cost of one embedder session (0.6B ONNX weights +
+/// ORT session + workspace), used by the RAM guard (t3-tr2).
+const MODEL_SESSION_GB: f64 = 2.0;
+
+/// Available system RAM in GiB (Linux `/proc/meminfo` MemAvailable,
+/// macOS `sysctl hw.memsize` as a total-RAM proxy; `None` elsewhere —
+/// the guard then silently no-ops rather than guessing).
+fn mem_available_gb() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    if let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") {
+        for line in meminfo.lines() {
+            if let Some(kb) = line.strip_prefix("MemAvailable:") {
+                if let Ok(kb) = kb.trim().trim_end_matches(" kB").trim().parse::<u64>() {
+                    return Some(kb as f64 / 1_048_576.0);
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    if let Ok(out) = std::process::Command::new("sysctl")
+        .args(["-n", "hw.memsize"])
+        .output()
+    {
+        if let Ok(gb) = String::from_utf8_lossy(&out.stdout).trim().parse::<u64>() {
+            return Some(gb as f64 / 1_073_741_824.0);
+        }
+    }
+    None
+}
+
 /// A pool of [`Embedder`] sessions: `size` independent sessions for
 /// parallel passage embedding. Each session owns a private model copy
 /// (~600MB per session for the 0.6B); `embed_passages` splits a batch
@@ -41,6 +71,20 @@ impl EmbedderPool {
         } else {
             threads.max(1)
         };
+        // RAM guard (t3-tr2): every session carries a private model copy —
+        // warn BEFORE allocating when the request likely exceeds available
+        // memory (the default pool is small; this guards explicit --pool).
+        if let Some(avail_gb) = mem_available_gb() {
+            let need_gb = size as f64 * MODEL_SESSION_GB;
+            if need_gb > avail_gb {
+                tracing::warn!(
+                    sessions = size,
+                    est_gb = need_gb,
+                    avail_gb,
+                    "embedder pool likely exceeds available RAM — lower --pool"
+                );
+            }
+        }
         let mut embedders = Vec::with_capacity(size);
         for i in 0..size {
             let e = Embedder::load(spec, per, ep)
