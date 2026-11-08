@@ -1223,6 +1223,9 @@ async fn mcp_http(
                 for q in &qs {
                     let req = SearchRequest {
                         query: q.clone(),
+                        // MCP-originated — keeps the query log's
+                        // client field honest (t3-pbh).
+                        client: Some("mcp".to_string()),
                         corpus: corpus.clone(),
                         top_k,
                         ..SearchRequest::default()
