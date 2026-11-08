@@ -81,10 +81,13 @@ impl Bm25Builder {
     }
 }
 
-/// Query-time reader (one per query context; serve pools them).
+/// Query-time reader — one pooled `IndexReader` per corpus (t3-css.1.5):
+/// `IndexReader` is Send+Sync and `.searcher()` is the per-query operation;
+/// constructing the reader per query is wasted work on the daemon hot path.
 pub struct Bm25Index {
     index: Index,
     fields: SchemaFields,
+    reader: tantivy::IndexReader,
 }
 
 impl Bm25Index {
@@ -102,13 +105,17 @@ impl Bm25Index {
                 source: schema.get_field("source")?,
             }
         };
-        Ok(Self { index, fields })
+        let reader = index.reader().context("tantivy reader")?;
+        Ok(Self {
+            index,
+            fields,
+            reader,
+        })
     }
 
     /// BM25 top-k; returns (passage_id, bm25_score). Callers consume ranks.
     pub fn search(&self, query_str: &str, k: usize) -> Result<Vec<(u64, f32)>> {
-        let reader = self.index.reader().context("tantivy reader")?;
-        let searcher = reader.searcher();
+        let searcher = self.reader.searcher();
         let qp = QueryParser::for_index(
             &self.index,
             vec![self.fields.text, self.fields.title, self.fields.question],
