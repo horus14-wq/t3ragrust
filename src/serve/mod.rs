@@ -111,6 +111,9 @@ struct DaemonState {
 #[derive(Deserialize)]
 struct SearchRequest {
     query: String,
+    /// Client self-identifies for the query log (t3-pbh):
+    /// `cli` | `mcp` | `http` (absent = http).
+    client: Option<String>,
     corpus: Option<String>,
     top_k: Option<usize>,
     candidates: Option<usize>,
@@ -352,6 +355,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/health", get(health))
         .route("/corpora", get(list_corpora))
         .route("/metrics", get(metrics))
+        .route("/passages/{corpus}/{id}", get(passage))
         .merge(authed)
         .layer(axum::extract::DefaultBodyLimit::max(args.max_body))
         .with_state(state.clone());
@@ -468,6 +472,7 @@ fn err_response(msg: String) -> axum::response::Response {
 /// RRF merge -> optional cross-encoder -> parent hydration + dedupe ->
 /// filters/diversity/truncation/pagination (t3-css.3.4).
 fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchResponse<'a>> {
+    let t0 = Instant::now();
     // A model override only works if the daemon loaded that model —
     // otherwise the client must take the cold path.
     if let Some(m) = &req.model {
@@ -768,6 +773,22 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     } else {
         None
     };
+    // Query log (t3-pbh): the daemon is the single writer — every
+    // handled search appends one JSONL line for `t3rag log`/insights.
+    crate::log::append(&crate::log::SearchEntry {
+        ts: crate::log::now_ts(),
+        client: req.client.as_deref().unwrap_or("http"),
+        query: &req.query,
+        corpora: corpora
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        top_ids: results.iter().map(|h| h.passage_id).collect(),
+        top_scores: results.iter().map(|h| h.score).collect(),
+        took_ms: t0.elapsed().as_secs_f64() * 1000.0,
+        preset: req.preset.as_deref(),
+    });
     Ok(SearchResponse {
         query: &req.query,
         corpus: corpora
@@ -782,6 +803,37 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
 }
 
 /// `GET /metrics` — uptime + request counter for monitoring (t3-css.3.7).
+/// `GET /passages/{corpus}/{id}` — one full passage incl. chunk linkage
+/// (t3-vqd). Unauthenticated like /health: it's a read of a local store.
+async fn passage(
+    State(st): State<Arc<DaemonState>>,
+    axum::extract::Path((name, id)): axum::extract::Path<(String, u64)>,
+) -> impl IntoResponse {
+    match st.corpus(if name == "latest" { None } else { Some(&name) }) {
+        Ok((_, c)) => match c.reader.get(id) {
+            Ok(p) => (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "id": p.id, "text": p.text, "title": p.title,
+                    "question": p.question, "source": p.source,
+                    "parent_id": p.parent_id, "chunk_idx": p.chunk_idx,
+                })),
+            )
+                .into_response(),
+            Err(e) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": format!("{e:#}")})),
+            )
+                .into_response(),
+        },
+        Err(e) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": format!("{e:#}")})),
+        )
+            .into_response(),
+    }
+}
+
 /// `GET /metrics` — uptime + handled-request counter (t3-css.3.7).
 async fn metrics(State(st): State<Arc<DaemonState>>) -> impl IntoResponse {
     Json(serde_json::json!({
@@ -800,9 +852,32 @@ async fn mcp_http(
     st.touch();
     let msg2 = msg.clone();
     let result = tokio::task::spawn_blocking(move || {
-        let exec = |args: &serde_json::Value| -> Result<serde_json::Value> {
+        let exec = |name: &str, args: &serde_json::Value| -> Result<serde_json::Value> {
+            // get_passage (t3-vqd): pure store read via the loaded corpus —
+            // no embed, no fusion; mirrors GET /passages/{corpus}/{id}.
+            if name == "get_passage" {
+                let corpus = args["corpus"].as_str();
+                let id = args["passage_id"]
+                    .as_u64()
+                    .context("get_passage requires passage_id")?;
+                let (_, c) = st.corpus(corpus)?;
+                let p = c.reader.get(id)?;
+                let mut t = String::new();
+                if let Some(x) = &p.title {
+                    t.push_str(&format!("title: {x}\n"));
+                }
+                if let Some(x) = &p.question {
+                    t.push_str(&format!("question: {x}\n"));
+                }
+                if let Some(x) = &p.source {
+                    t.push_str(&format!("source: {x}\n"));
+                }
+                t.push_str(&p.text);
+                return Ok(serde_json::json!({"content": [{"type": "text", "text": t}]}));
+            }
             let req = SearchRequest {
                 query: args["query"].as_str().unwrap_or("").to_string(),
+                client: Some("mcp".to_string()),
                 corpus: args["corpus"].as_str().map(String::from),
                 top_k: args["top_k"].as_u64().map(|v| v as usize),
                 candidates: args["candidates"].as_u64().map(|v| v as usize),

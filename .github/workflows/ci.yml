@@ -11,7 +11,11 @@ env:
 
 jobs:
   gates:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-14]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
@@ -21,7 +25,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install mold linker
+      - name: Install mold linker (Linux only)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y mold
 
       - name: fmt

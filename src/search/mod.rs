@@ -184,6 +184,7 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
     let mut resp = ureq::post(&format!("{base}/search"))
         .send_json(serde_json::json!({
             "query": args.query,
+            "client": "cli",
             "corpus": args.corpus,
             "top_k": args.top_k,
             "candidates": candidates,

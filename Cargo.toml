@@ -31,6 +31,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal
 ureq = { version = "3", default-features = false, features = ["json"] }
 axum = { version = "0.8", features = ["json"] }
 fastembed = { version = "7.6.1", features = ["onnx", "hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"], optional = true }
+regex = "1"
+time = { version = "0.3", features = ["formatting", "parsing"] }
 
 # Execution-provider build variants. ort-sys ships ONE binary flavor per
 # build — enable at most one ep-* feature at a time (e.g.

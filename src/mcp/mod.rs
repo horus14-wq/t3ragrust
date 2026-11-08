@@ -58,6 +58,17 @@ fn tools_list() -> Value {
                 },
                 "required": ["query"]
             }
+        }, {
+            "name": "get_passage",
+            "description": "Fetch one passage in full (text + metadata + chunk linkage) by corpus and passage id — use after search_traces surfaces a promising hit.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "corpus": {"type": "string", "description": "corpus name"},
+                    "passage_id": {"type": "integer", "description": "passage id from a search hit"}
+                },
+                "required": ["passage_id"]
+            }
         }]
     })
 }
@@ -68,7 +79,9 @@ fn tools_list() -> Value {
 /// Implements `initialize`, `notifications/*`, `ping`, `tools/list`,
 /// `tools/call`; everything else gets `-32601` (honest tools-only
 /// surface, t3-css.3.6).
-pub fn handle_rpc(msg: &Value, exec: &dyn Fn(&Value) -> Result<Value>) -> Option<Value> {
+/// `exec` receives `(tool_name, arguments)` — one closure branches
+/// across the whole tool surface (t3-vqd: get_passage added).
+pub fn handle_rpc(msg: &Value, exec: &dyn Fn(&str, &Value) -> Result<Value>) -> Option<Value> {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let is_notification = msg.get("id").is_none();
@@ -83,15 +96,15 @@ pub fn handle_rpc(msg: &Value, exec: &dyn Fn(&Value) -> Result<Value>) -> Option
         "ping" => Ok(json!({})),
         "tools/list" => Ok(tools_list()),
         "tools/call" => match msg.pointer("/params/name").and_then(Value::as_str) {
-            Some("search_traces") => {
+            Some(name @ ("search_traces" | "get_passage")) => {
                 let args = msg
                     .pointer("/params/arguments")
                     .cloned()
                     .unwrap_or_else(|| json!({}));
-                match exec(&args) {
+                match exec(name, &args) {
                     Ok(v) => Ok(v),
                     Err(e) => Ok(json!({
-                        "content": [{"type": "text", "text": format!("search failed: {e:#}")}],
+                        "content": [{"type": "text", "text": format!("{name} failed: {e:#}")}],
                         "isError": true
                     })),
                 }
@@ -158,10 +171,36 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let exec = |a: &Value| -> Result<Value> {
+    let exec = |name: &str, a: &Value| -> Result<Value> {
+        // get_passage (t3-vqd): straight GET to the daemon's route —
+        // corpus defaults to the daemon's newest when omitted.
+        if name == "get_passage" {
+            let corpus = a["corpus"].as_str().unwrap_or("latest");
+            let id = a["passage_id"].as_u64().unwrap_or(0);
+            let mut resp = ureq::get(&format!("{base}/passages/{corpus}/{id}"))
+                .call()
+                .context("daemon /passages")?;
+            if resp.status().as_u16() != 200 {
+                anyhow::bail!("daemon returned {}", resp.status().as_u16());
+            }
+            let v: Value = resp.body_mut().read_json().context("daemon response")?;
+            let mut t = String::new();
+            if let Some(x) = v["title"].as_str() {
+                t.push_str(&format!("title: {x}\n"));
+            }
+            if let Some(x) = v["question"].as_str() {
+                t.push_str(&format!("question: {x}\n"));
+            }
+            if let Some(x) = v["source"].as_str() {
+                t.push_str(&format!("source: {x}\n"));
+            }
+            t.push_str(v["text"].as_str().unwrap_or(""));
+            return Ok(json!({"content": [{"type": "text", "text": t}]}));
+        }
         let mut resp = ureq::post(&format!("{base}/search"))
             .send_json(json!({
                 "query": a["query"].as_str().unwrap_or(""),
+                "client": "mcp",
                 "corpus": a["corpus"].as_str(),
                 "top_k": a["top_k"].as_u64().unwrap_or(3),
                 "rerank": a["rerank"].as_bool().unwrap_or(true),
@@ -209,14 +248,14 @@ mod tests {
     #[test]
     fn initialize_returns_server_info() {
         let m = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
-        let r = handle_rpc(&m, &|_| unreachable!()).unwrap();
+        let r = handle_rpc(&m, &|_, _| unreachable!()).unwrap();
         assert_eq!(r["result"]["serverInfo"]["name"], "t3rag");
     }
 
     #[test]
     fn tools_list_exposes_search_traces() {
         let m = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
-        let r = handle_rpc(&m, &|_| unreachable!()).unwrap();
+        let r = handle_rpc(&m, &|_, _| unreachable!()).unwrap();
         let name = r["result"]["tools"][0]["name"].as_str().unwrap();
         assert_eq!(name, "search_traces");
     }
@@ -227,7 +266,7 @@ mod tests {
             "jsonrpc":"2.0","id":3,"method":"tools/call",
             "params":{"name":"search_traces","arguments":{"query":"q"}}
         });
-        let r = handle_rpc(&m, &|_| {
+        let r = handle_rpc(&m, &|_, _| {
             Ok(serde_json::json!({"content":[{"type":"text","text":"ok"}]}))
         })
         .unwrap();
@@ -237,7 +276,7 @@ mod tests {
     #[test]
     fn notification_gets_no_response() {
         let m = serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-        assert!(handle_rpc(&m, &|_| unreachable!()).is_none());
+        assert!(handle_rpc(&m, &|_, _| unreachable!()).is_none());
     }
 
     #[test]
@@ -246,7 +285,7 @@ mod tests {
             "jsonrpc":"2.0","id":4,"method":"tools/call",
             "params":{"name":"nope","arguments":{}}
         });
-        let r = handle_rpc(&m, &|_| unreachable!()).unwrap();
+        let r = handle_rpc(&m, &|_, _| unreachable!()).unwrap();
         assert!(r["error"]["message"]
             .as_str()
             .unwrap()

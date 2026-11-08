@@ -253,6 +253,36 @@ pub fn run_pull(args: crate::cli::PullArgs) -> Result<()> {
     Ok(())
 }
 
+/// `t3rag show <corpus> <id>` — print one passage in full (t3-vqd):
+/// text + question/source/title + chunk linkage. Pure store read — no
+/// model, no daemon required.
+///
+/// # Errors
+/// The corpus isn't indexed, or `id` is out of range.
+pub fn run_show(corpus: Option<String>, id: u64) -> Result<()> {
+    let root = paths::corpora_root()?;
+    let name = corpus.unwrap_or(crate::serve::newest_corpus(&root)?);
+    let dir = root.join(&name);
+    let reader = crate::store::PassageReader::open(&dir)
+        .with_context(|| format!("corpus '{name}' not indexed"))?;
+    let p = reader.get(id)?;
+    println!("id:        {}", p.id);
+    if let Some(t) = &p.title {
+        println!("title:     {t}");
+    }
+    if let Some(q) = &p.question {
+        println!("question:  {q}");
+    }
+    if let Some(s) = &p.source {
+        println!("source:    {s}");
+    }
+    if p.parent_id != p.id {
+        println!("parent:    {} (chunk {})", p.parent_id, p.chunk_idx);
+    }
+    println!("text:\n{}", p.text);
+    Ok(())
+}
+
 /// `t3rag selftest` — alias-level sanity (same as `health`, plus a clap
 /// parse of the full arg surface so the help tree itself is proven).
 pub fn run_selftest() -> Result<()> {

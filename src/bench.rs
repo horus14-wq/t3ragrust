@@ -101,6 +101,7 @@ fn one_query(
     let mut resp = ureq::post(&format!("{base}/search"))
         .send_json(serde_json::json!({
             "query": query,
+            "client": "cli",
             "corpus": corpus,
             "top_k": args.top_k,
             "candidates": args.candidates,

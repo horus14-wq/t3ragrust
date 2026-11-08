@@ -168,6 +168,7 @@ fn search_ids(
     let mut resp = ureq::post(&format!("{base}/search"))
         .send_json(serde_json::json!({
             "query": query,
+            "client": "cli",
             "queries": also,
             "corpus": corpus,
             "top_k": 10,

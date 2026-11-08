@@ -43,6 +43,7 @@ impl Cli {
             Command::Bench(args) => crate::bench::run_bench(args),
             Command::Skill(args) => crate::skill::run_skill(args),
             Command::List => crate::doctor::run_list(),
+            Command::Log(args) => crate::log::run_log(&args),
             Command::Stats(args) => crate::doctor::run_stats(args.corpus),
             Command::Doctor => crate::doctor::run_doctor(),
             Command::Health => crate::doctor::run_health(),
@@ -51,6 +52,7 @@ impl Cli {
             Command::Export(args) => crate::capabilities::run_export(args),
             Command::Publish(args) => crate::capabilities::run_publish(args),
             Command::Pull(args) => crate::capabilities::run_pull(args),
+            Command::Show { corpus, id } => crate::capabilities::run_show(corpus, id),
             Command::Completions { shell } => crate::capabilities::run_completions(shell),
             Command::Man { dir } => crate::capabilities::run_man(&dir),
             Command::Selftest => crate::capabilities::run_selftest(),
@@ -79,6 +81,8 @@ pub enum Command {
     Skill(SkillArgs),
     /// List indexed corpora (name, docs, dims, model, size, age).
     List,
+    /// Search history: filter the append-only query log (t3-pbh).
+    Log(LogArgs),
     /// Deep stats for one corpus (default: newest).
     Stats(StatsArgs),
     /// Environment sanity: SIMD, EPs, HF cache, corpora, daemon.
@@ -95,6 +99,14 @@ pub enum Command {
     Publish(PublishArgs),
     /// Download a published corpus into the local corpora root.
     Pull(PullArgs),
+    /// Print one passage in full (no model needed).
+    Show {
+        /// Corpus name (default: newest).
+        #[arg(long, env = "T3RAG_CORPUS")]
+        corpus: Option<String>,
+        /// Passage id.
+        id: u64,
+    },
     /// Generate shell completions.
     Completions {
         #[arg(long, value_enum)]
@@ -432,6 +444,23 @@ impl SearchArgs {
             self.format
         }
     }
+}
+
+/// Arguments for `t3rag log` (query-history reader, t3-pbh).
+#[derive(Args)]
+pub struct LogArgs {
+    /// Only entries newer than this: 90s, 10m, 1h, 7d (bare number = seconds).
+    #[arg(long)]
+    pub since: Option<String>,
+    /// Only entries that searched this corpus.
+    #[arg(long)]
+    pub corpus: Option<String>,
+    /// Only entries whose query matches this regex.
+    #[arg(long)]
+    pub query_regex: Option<String>,
+    /// Emit raw JSONL lines instead of the table.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for `t3rag stats` (deep corpus inspection).
