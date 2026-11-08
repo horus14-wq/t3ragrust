@@ -23,20 +23,28 @@ pub fn est_tokens(text: &str) -> usize {
 /// Whether `text` should be structurally chunked for retrieval
 /// (rough token estimate over the chunk threshold).
 pub fn needs_chunk(text: &str) -> bool {
-    est_tokens(text) > CHUNK_TRIGGER_EST_TOKENS
+    needs_chunk_thresh(text, CHUNK_TRIGGER_EST_TOKENS)
 }
 
-/// Split `text` into structurally-bounded chunks of roughly
-/// CHUNK_TARGET_CHARS each. Always returns ≥1 chunk.
+/// Same trigger with an override (t3-css.2.8 `--chunk-tokens`).
+pub fn needs_chunk_thresh(text: &str, thresh_est_tokens: usize) -> bool {
+    est_tokens(text) > thresh_est_tokens
+}
+
 /// Split `text` into retrievable chunks on structural boundaries
 /// (paragraphs/sections), each under the token budget. Parents are
 /// stored un-embedded and hydrated at query time (t3-wkp.11).
 pub fn split(text: &str) -> Vec<String> {
+    split_with_target(text, CHUNK_TARGET_CHARS)
+}
+
+/// Same splitter with a target-size override (t3-css.2.8 `--chunk-chars`).
+pub fn split_with_target(text: &str, target_chars: usize) -> Vec<String> {
     if !needs_chunk(text) {
         return vec![text.to_string()];
     }
     let blocks = structural_blocks(text);
-    pack_blocks(&blocks)
+    pack_blocks(&blocks, target_chars)
 }
 
 /// Split into semantic blocks: blank-line groups, with markdown headings
@@ -63,18 +71,18 @@ fn structural_blocks(text: &str) -> Vec<String> {
 
 /// Greedy pack of blocks into <=target chunks; an oversized single block is
 /// hard-split at line boundaries (char boundary as last resort).
-fn pack_blocks(blocks: &[String]) -> Vec<String> {
+fn pack_blocks(blocks: &[String], target_chars: usize) -> Vec<String> {
     let mut chunks = Vec::new();
     let mut cur = String::new();
     for b in blocks {
-        if b.len() > CHUNK_TARGET_CHARS {
+        if b.len() > target_chars {
             if !cur.is_empty() {
                 chunks.push(std::mem::take(&mut cur));
             }
-            chunks.extend(hard_split(b));
+            chunks.extend(hard_split(b, target_chars));
             continue;
         }
-        if !cur.is_empty() && cur.len() + b.len() > CHUNK_TARGET_CHARS {
+        if !cur.is_empty() && cur.len() + b.len() > target_chars {
             chunks.push(std::mem::take(&mut cur));
         }
         cur.push_str(b);
@@ -90,14 +98,14 @@ fn pack_blocks(blocks: &[String]) -> Vec<String> {
 
 /// Last-resort split: break on newline boundaries near the target; when a
 /// single line exceeds the target, cut at a char boundary.
-fn hard_split(text: &str) -> Vec<String> {
+fn hard_split(text: &str, target_chars: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     for line in text.split_inclusive('\n') {
-        while line.len() > CHUNK_TARGET_CHARS.saturating_sub(cur.len()) && !cur.is_empty() {
+        while line.len() > target_chars.saturating_sub(cur.len()) && !cur.is_empty() {
             out.push(std::mem::take(&mut cur));
         }
-        if line.len() > CHUNK_TARGET_CHARS {
+        if line.len() > target_chars {
             // Giant single line: emit the pending chunk, then char-cut.
             if !cur.is_empty() {
                 out.push(std::mem::take(&mut cur));

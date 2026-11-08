@@ -10,7 +10,10 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use tantivy::collector::TopDocs;
 use tantivy::query::QueryParser;
-use tantivy::schema::{Field, Schema, Value, STORED, STRING, TEXT};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, STRING,
+};
+use tantivy::tokenizer::{LowerCaser, RemoveLongFilter, SimpleTokenizer, TextAnalyzer};
 use tantivy::{doc, Index, IndexWriter};
 
 use crate::passage::Passage;
@@ -25,13 +28,32 @@ pub struct SchemaFields {
     pub source: Field,
 }
 
+/// Custom `t3` tokenizer (t3-css.2.8): `SimpleTokenizer → RemoveLong(40)
+/// → LowerCaser` — no stemmer (stemming mangles identifiers/trace jargon)
+/// + `WithFreqs` (positions dropped; BM25 only needs freqs — smaller index).
+fn register_t3(index: &Index) {
+    index.tokenizers().register(
+        "t3",
+        TextAnalyzer::builder(SimpleTokenizer::default())
+            .filter(RemoveLongFilter::limit(40))
+            .filter(LowerCaser)
+            .build(),
+    );
+}
+
 fn build_schema() -> (Schema, SchemaFields) {
+    let indexing = TextFieldIndexing::default()
+        .set_tokenizer("t3")
+        .set_index_option(IndexRecordOption::WithFreqs);
+    let text_opts = TextOptions::default()
+        .set_indexing_options(indexing)
+        .set_stored();
     let mut b = Schema::builder();
     let fields = SchemaFields {
         passage_id: b.add_u64_field("passage_id", STORED),
-        text: b.add_text_field("text", TEXT),
-        title: b.add_text_field("title", TEXT),
-        question: b.add_text_field("question", TEXT),
+        text: b.add_text_field("text", text_opts.clone()),
+        title: b.add_text_field("title", text_opts.clone()),
+        question: b.add_text_field("question", text_opts),
         source: b.add_text_field("source", STRING | STORED),
     };
     (b.build(), fields)
@@ -44,16 +66,23 @@ pub struct Bm25Builder {
 }
 
 impl Bm25Builder {
-    pub fn create(corpus_dir: &Path) -> Result<Self> {
+    /// `heap_mb`/`threads` (t3-css.2.8): `--bm25-heap-mb`/`--bm25-threads`;
+    /// threads=0 keeps tantivy's own parallelism default.
+    pub fn create(corpus_dir: &Path, heap_mb: usize, threads: usize) -> Result<Self> {
         let dir = corpus_dir.join(BM25_DIR);
         std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
         let (schema, fields) = build_schema();
         let index = Index::create_in_dir(&dir, schema)
             .with_context(|| format!("create tantivy index in {}", dir.display()))?;
-        // 50MB writer heap; tantivy parallelizes segment build internally.
-        let writer = index
-            .writer(50_000_000)
-            .context("create tantivy index writer")?;
+        register_t3(&index);
+        let heap = heap_mb * 1_000_000;
+        let writer = if threads == 0 {
+            index.writer(heap).context("create tantivy index writer")?
+        } else {
+            index
+                .writer_with_num_threads(threads, heap)
+                .context("create tantivy index writer")?
+        };
         Ok(Self { writer, fields })
     }
 
@@ -95,6 +124,10 @@ impl Bm25Index {
         let dir = corpus_dir.join(BM25_DIR);
         let index = Index::open_in_dir(&dir)
             .with_context(|| format!("open tantivy index {}", dir.display()))?;
+        // t3-css.2.8: indexes built pre-analyzer-register had the default
+        // tokenizer baked in — the register is inert for them (the field
+        // records its own tokenizer name). New-format fields name "t3".
+        register_t3(&index);
         let fields = {
             let schema = index.schema();
             SchemaFields {

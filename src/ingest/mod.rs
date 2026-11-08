@@ -22,35 +22,48 @@ use crate::passage::Passage;
 /// Boxed passage stream produced by an ingest reader.
 pub type RawIter = Box<dyn Iterator<Item = Result<RawPassage>> + Send>;
 
-/// A normalized ingest record prior to id assignment.
+/// A normalized ingest record prior to id assignment — the common
+/// shape every reader produces before `to_passage` materializes it.
 #[derive(Debug)]
 pub struct RawPassage {
+    /// Passage body text (required; empty text is skipped downstream).
     pub text: String,
+    /// Optional display title (dir ingest uses the filename).
     pub title: Option<String>,
+    /// Optional originating question, when the corpus records one.
     pub question: Option<String>,
+    /// Optional provenance tag (file path, upstream id, ...).
     pub source: Option<String>,
 }
 
 /// Which reader handled the input (for stats logging).
 #[derive(Clone, Copy, Debug)]
 pub enum InputKind {
+    /// `.jsonl` / `.json` / `.ndjson` line-delimited records.
     Jsonl,
+    /// Directory of `.md` / `.txt` / `.markdown` files.
     Directory,
+    /// `.parquet` via arrow streaming (feature `parquet`).
     #[cfg(feature = "parquet")]
     Parquet,
 }
 
 /// Open `input`, auto-detecting the format: directory -> dir reader,
 /// `.parquet` -> parquet (feature-gated), otherwise JSONL. `text_col`
-/// overrides parquet column auto-detection.
+/// overrides parquet column auto-detection; `batch_size` sets the
+/// parquet RecordBatch row count (ignored by jsonl/dir readers).
+///
+/// Returns the iterator of raw records, the detected kind, and the shared
+/// skip-stats counter (updated as the iterator is consumed).
 ///
 /// # Errors
 /// The input cannot be opened, or its format is unrecognized (or a
 /// `.parquet` without the `parquet` feature).
-///
-/// Returns the iterator of raw records, the detected kind, and the shared
-/// skip-stats counter (updated as the iterator is consumed).
-pub fn open(input: &Path, text_col: Option<&str>) -> Result<(RawIter, InputKind, SkipStats)> {
+pub fn open(
+    input: &Path,
+    text_col: Option<&str>,
+    batch_size: usize,
+) -> Result<(RawIter, InputKind, SkipStats)> {
     if input.is_dir() {
         let (it, stats) = dir::open(input)?;
         return Ok((it, InputKind::Directory, stats));
@@ -62,7 +75,7 @@ pub fn open(input: &Path, text_col: Option<&str>) -> Result<(RawIter, InputKind,
         "parquet" => {
             #[cfg(feature = "parquet")]
             {
-                let (it, stats) = parquet_reader::open(input, text_col)?;
+                let (it, stats) = parquet_reader::open(input, text_col, batch_size)?;
                 Ok((it, InputKind::Parquet, stats))
             }
             #[cfg(not(feature = "parquet"))]
@@ -82,8 +95,6 @@ pub fn open(input: &Path, text_col: Option<&str>) -> Result<(RawIter, InputKind,
     }
 }
 
-/// Materialize a raw record into a `Passage` with its dense ordinal id.
-/// Returns `None` (and counts a skip) for empty/whitespace text.
 /// FxHash of a passage's text — the `--dedup` key (t3-css.2.8).
 /// Fast, not cryptographic: exact duplicates only.
 pub fn hash_text(text: &str) -> u64 {

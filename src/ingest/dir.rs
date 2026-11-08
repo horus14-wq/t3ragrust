@@ -7,6 +7,17 @@ use anyhow::{Context, Result};
 
 use super::{is_text_file, RawIter, RawPassage, SkipStats};
 
+/// Open `dir` for ingest: collect every `.md`/`.markdown`/`.txt` file
+/// recursively, sort paths for deterministic doc-id order, and read them
+/// in parallel (rayon preserves order). Each file becomes one
+/// [`RawPassage`]; the filename stem becomes `title` and the path becomes
+/// `source`.
+///
+/// Unreadable files are skipped (counted in `SkipStats`, logged at warn)
+/// rather than failing the whole corpus.
+///
+/// # Errors
+/// The directory cannot be listed.
 pub fn open(dir: &Path) -> Result<(RawIter, SkipStats)> {
     // Collect + sort up front for reproducible re-index order.
     let mut files: Vec<PathBuf> = Vec::new();
@@ -44,6 +55,7 @@ pub fn open(dir: &Path) -> Result<(RawIter, SkipStats)> {
     Ok((Box::new(it), stats))
 }
 
+/// Recursively collect text-file paths under `dir` (unsorted).
 fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir).with_context(|| format!("read dir {}", dir.display()))? {
         let entry = entry?;
@@ -57,9 +69,9 @@ fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+/// Read one file into `(text, title)`; invalid UTF-8 becomes the
+/// replacement char rather than a hard failure (documented choice).
 fn read_one(path: &Path) -> Result<(String, String)> {
-    // lossy-convert: corpus text is user-supplied; invalid UTF-8 becomes the
-    // replacement char rather than a hard failure (documented choice).
     let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let text = String::from_utf8_lossy(&bytes).into_owned();
     let title = path

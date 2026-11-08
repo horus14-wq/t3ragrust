@@ -5,9 +5,10 @@ use std::sync::{Arc, Mutex};
 
 /// Thread-safe skip/read counters shared between a reader iterator and the
 /// pipeline that consumes it. Cheap to clone (Arc internals).
-#[derive(Clone, Default)]
+///
 /// Ingest bookkeeping: `read`/`skipped` counts + a per-reason
 /// histogram printed at index end.
+#[derive(Clone, Default)]
 pub struct SkipStats {
     read: Arc<AtomicU64>,
     skipped: Arc<AtomicU64>,
@@ -16,11 +17,13 @@ pub struct SkipStats {
 }
 
 impl SkipStats {
+    /// Count one successfully read record of `bytes` length.
     pub fn record_read(&self, bytes: u64) {
         self.read.fetch_add(1, Ordering::Relaxed);
         self.bytes.fetch_add(bytes, Ordering::Relaxed);
     }
 
+    /// Count one skipped record under `reason` (histogram key).
     pub fn skip(&self, reason: &str) {
         self.skipped.fetch_add(1, Ordering::Relaxed);
         *self
@@ -31,18 +34,22 @@ impl SkipStats {
             .or_insert(0) += 1;
     }
 
+    /// Records seen so far (including skipped ones).
     pub fn read(&self) -> u64 {
         self.read.load(Ordering::Relaxed)
     }
 
+    /// Records skipped so far (all reasons).
     pub fn skipped(&self) -> u64 {
         self.skipped.load(Ordering::Relaxed)
     }
 
+    /// Total bytes across read records.
     pub fn bytes(&self) -> u64 {
         self.bytes.load(Ordering::Relaxed)
     }
 
+    /// Per-reason skip counts, sorted by reason name.
     pub fn reasons(&self) -> BTreeMap<String, u64> {
         self.reasons
             .lock()

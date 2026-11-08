@@ -4578,6 +4578,7 @@ dependencies = [
  "dirs",
  "fastembed",
  "hf-hub 1.0.0",
+ "indicatif",
  "memmap2",
  "ort",
  "parquet",

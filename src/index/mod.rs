@@ -4,6 +4,7 @@
 pub mod bm25;
 pub mod dense;
 
+use std::io::IsTerminal;
 use std::time::Instant;
 
 use anyhow::{bail, Context, Result};
@@ -40,7 +41,7 @@ fn hostname() -> String {
 /// inspection — it is not installed).
 pub fn run_index(args: IndexArgs) -> Result<()> {
     let t0 = Instant::now();
-    let (iter, kind, stats) = ingest::open(&args.input, args.text_col.as_deref())?;
+    let (iter, kind, stats) = ingest::open(&args.input, args.text_col.as_deref(), args.batch_size)?;
     info!(?kind, input = %args.input.display(), "ingest opened");
 
     // Dry run (t3-css.2.8): ingest+count only — placed BEFORE the embedder
@@ -70,11 +71,18 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         .with_context(|| format!("create {}", build_dir.display()))?;
 
     let mut writer = PassageWriter::create(&build_dir)?;
-    let mut lex = Bm25Builder::create(&build_dir)?;
+    let mut lex = Bm25Builder::create(&build_dir, args.bm25_heap_mb, args.bm25_threads)?;
     // Matryoshka truncation (t3-css.2.4): --dims stores only the leading N
     // dims (re-normalized); query vectors truncate the same way.
     let store_dims = args.dims.unwrap_or_else(|| emb.dims());
-    let mut dense = DenseBuilder::create(&build_dir, store_dims, args.quantization)?;
+    let mut dense = DenseBuilder::create(
+        &build_dir,
+        store_dims,
+        args.quantization,
+        args.connectivity,
+        args.expansion_add,
+        !args.no_raw_vectors,
+    )?;
     // Aboutness manifest (t3-iv2): accumulates transform type, question
     // terms, length histogram, language, and the passage-vector centroid
     // for meta.json — corpus routing for `suggest`/`list`.
@@ -96,7 +104,20 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     let mut batch_tokens = 0usize;
     let mut chunked = 0u64;
     let mut seen_hashes: rustc_hash::FxHashSet<u64> = Default::default();
+    // indicatif progress (t3-css.2.8): spinner + rate on tty, hidden
+    // otherwise — no progress noise in logs/pipes or with --no-progress.
+    let pb = if args.progress && !args.no_progress && std::io::stderr().is_terminal() {
+        let pb = indicatif::ProgressBar::new_spinner();
+        pb.set_style(indicatif::ProgressStyle::with_template(
+            "{spinner} {elapsed_precise} {pos} passages {msg}",
+        )?);
+        pb.enable_steady_tick(std::time::Duration::from_millis(120));
+        pb
+    } else {
+        indicatif::ProgressBar::hidden()
+    };
     for raw in iter {
+        pb.inc(1);
         let raw = raw?;
         let Some(mut p) = ingest::to_passage(raw, next_id, &stats) else {
             continue;
@@ -120,14 +141,27 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
             continue;
         }
 
-        if crate::chunk::needs_chunk(&p.text) && !args.no_chunk {
+        if (args.always_chunk
+            || crate::chunk::needs_chunk_thresh(
+                &p.text,
+                args.chunk_tokens
+                    .unwrap_or(crate::chunk::CHUNK_TRIGGER_EST_TOKENS),
+            ))
+            && !args.no_chunk
+        {
             // Structural chunking (t3-wkp.11): store the parent for hydration
             // (no vector, no BM25 doc); index the chunks as retrievable units.
             chunked += 1;
             let parent_id = p.id;
             writer.push(&p)?;
             next_id += 1;
-            for (ci, text) in crate::chunk::split(&p.text).into_iter().enumerate() {
+            for (ci, text) in crate::chunk::split_with_target(
+                &p.text,
+                args.chunk_chars.unwrap_or(crate::chunk::CHUNK_TARGET_CHARS),
+            )
+            .into_iter()
+            .enumerate()
+            {
                 let mut c = crate::passage::Passage::new(next_id, text);
                 c.title = p.title.clone();
                 c.question = p.question.clone();
@@ -193,6 +227,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         &mut sparse_sink,
         &mut manifest,
     )?;
+    pb.finish_and_clear();
     if chunked > 0 {
         info!(chunked_parents = chunked, "structural chunking applied");
     }

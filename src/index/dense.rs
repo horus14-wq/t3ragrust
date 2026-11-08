@@ -35,22 +35,27 @@ fn scalar_kind(q: Quantization) -> ScalarKind {
     }
 }
 
-fn options(dims: usize, q: Quantization) -> IndexOptions {
+fn options(
+    dims: usize,
+    q: Quantization,
+    connectivity: usize,
+    expansion_add: usize,
+) -> IndexOptions {
     IndexOptions {
         dimensions: dims,
         metric: MetricKind::IP,
         quantization: scalar_kind(q),
-        connectivity: CONNECTIVITY,
-        expansion_add: EXPANSION_ADD,
+        connectivity,
+        expansion_add,
         expansion_search: EXPANSION_SEARCH,
         multi: false,
     }
 }
 
-/// Build-time writer: ANN adds + raw-vector blob.
+/// Build-time writer: ANN adds + raw-vector blob (optional: t3-css.2.8).
 pub struct DenseBuilder {
     index: Index,
-    raw: BufWriter<File>,
+    raw: Option<BufWriter<File>>,
     raw_path: PathBuf,
     index_path: PathBuf,
     count: usize,
@@ -59,19 +64,35 @@ pub struct DenseBuilder {
 }
 
 impl DenseBuilder {
-    pub fn create(dir: &Path, dims: usize, quant: Quantization) -> Result<Self> {
-        let index = Index::new(&options(dims, quant))
+    /// `write_raw=false` (t3-css.2.8 `--no-raw-vectors`): skip the raw
+    /// vector blob — halves index disk; exact-scan search then fails
+    /// honestly ("built with --no-raw-vectors").
+    pub fn create(
+        dir: &Path,
+        dims: usize,
+        quant: Quantization,
+        connectivity: usize,
+        expansion_add: usize,
+        write_raw: bool,
+    ) -> Result<Self> {
+        let index = Index::new(&options(dims, quant, connectivity, expansion_add))
             .map_err(|e| anyhow::anyhow!("create usearch index: {e}"))?;
         let capacity = 1024usize;
         index
             .reserve(capacity)
             .map_err(|e| anyhow::anyhow!("usearch reserve: {e}"))?;
         let raw_path = dir.join(RAW_FILE);
-        let mut raw = BufWriter::new(
-            File::create(&raw_path).with_context(|| format!("create {}", raw_path.display()))?,
-        );
-        raw.write_all(&0u64.to_le_bytes())?; // n placeholder, patched at finish
-        raw.write_all(&(dims as u64).to_le_bytes())?;
+        let raw = write_raw
+            .then(|| {
+                let mut r = BufWriter::new(
+                    File::create(&raw_path)
+                        .with_context(|| format!("create {}", raw_path.display()))?,
+                );
+                r.write_all(&0u64.to_le_bytes())?; // n placeholder
+                r.write_all(&(dims as u64).to_le_bytes())?;
+                anyhow::Ok(r)
+            })
+            .transpose()?;
         // Each record: [u64 passage_id][dims f32] — ids explicit since
         // chunking may skip embedding stored (parent) passages.
         Ok(Self {
@@ -98,9 +119,11 @@ impl DenseBuilder {
         self.index
             .add(id, vector)
             .map_err(|e| anyhow::anyhow!("usearch add: {e}"))?;
-        self.raw.write_all(&id.to_le_bytes())?;
-        for v in vector {
-            self.raw.write_all(&v.to_le_bytes())?;
+        if let Some(raw) = &mut self.raw {
+            raw.write_all(&id.to_le_bytes())?;
+            for v in vector {
+                raw.write_all(&v.to_le_bytes())?;
+            }
         }
         self.count += 1;
         Ok(())
@@ -111,38 +134,49 @@ impl DenseBuilder {
         self.index
             .save(self.index_path.to_str().context("non-utf8 index path")?)
             .map_err(|e| anyhow::anyhow!("usearch save {}: {e}", self.index_path.display()))?;
-        self.raw.flush()?;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&self.raw_path)?;
-        f.seek(SeekFrom::Start(0))?;
-        f.write_all(&(self.count as u64).to_le_bytes())?;
-        f.sync_all()?;
+        if let Some(mut raw) = self.raw {
+            raw.flush()?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.raw_path)?;
+            f.seek(SeekFrom::Start(0))?;
+            f.write_all(&(self.count as u64).to_le_bytes())?;
+            f.sync_all()?;
+        }
         Ok(self.count)
     }
 }
 
-/// Query-time view: mmap'd HNSW + mmap'd raw blob for exact scans.
+/// Query-time view: mmap'd HNSW + mmap'd raw blob for exact scans
+/// (`None` when indexed with `--no-raw-vectors`, t3-css.2.8).
 pub struct DenseIndex {
     index: Index,
-    raw: Mmap,
+    raw: Option<Mmap>,
     dims: usize,
 }
 
 impl DenseIndex {
     pub fn view(dir: &Path, dims: usize, quant: Quantization) -> Result<Self> {
         let index_path = dir.join(DENSE_FILE);
-        let index = Index::new(&options(dims, quant))
+        let index = Index::new(&options(dims, quant, CONNECTIVITY, EXPANSION_ADD))
             .map_err(|e| anyhow::anyhow!("create usearch handle: {e}"))?;
         index
             .view(index_path.to_str().context("non-utf8 index path")?)
             .map_err(|e| anyhow::anyhow!("usearch view {}: {e}", index_path.display()))?;
+        // --no-raw-vectors corpora (t3-css.2.8): raw blob may not exist —
+        // ANN search still works; exact_search reports it honestly.
         let raw_path = dir.join(RAW_FILE);
-        let raw_file =
-            File::open(&raw_path).with_context(|| format!("open {}", raw_path.display()))?;
-        // Safety: read-only map of an immutable artifact.
-        let raw = unsafe { Mmap::map(&raw_file) }
-            .with_context(|| format!("mmap {}", raw_path.display()))?;
+        let raw = if raw_path.exists() {
+            let raw_file =
+                File::open(&raw_path).with_context(|| format!("open {}", raw_path.display()))?;
+            // Safety: read-only map of an immutable artifact.
+            Some(
+                unsafe { Mmap::map(&raw_file) }
+                    .with_context(|| format!("mmap {}", raw_path.display()))?,
+            )
+        } else {
+            None
+        };
         Ok(Self { index, raw, dims })
     }
 
@@ -171,7 +205,10 @@ impl DenseIndex {
         if query.len() != self.dims {
             bail!("query dims {} != index dims {}", query.len(), self.dims);
         }
-        let buf = &self.raw[..];
+        let Some(raw) = &self.raw else {
+            bail!("corpus indexed with --no-raw-vectors — exact scan unavailable");
+        };
+        let buf = &raw[..];
         if buf.len() < 16 {
             bail!("corrupt {}: too small", RAW_FILE);
         }

@@ -14,7 +14,20 @@ use super::{RawIter, RawPassage, SkipStats};
 const TEXT_CANDIDATES: [&str; 3] = ["text", "content", "passage"];
 const META_CANDIDATES: [&str; 3] = ["title", "question", "source"];
 
-pub fn open(path: &Path, text_col: Option<&str>) -> Result<(RawIter, SkipStats)> {
+/// Open a `.parquet` file for ingest, streaming record batches (never
+/// materializing the whole table). `text_col` pins the text column;
+/// otherwise the first of `text`/`content`/`passage` wins. `title`,
+/// `question`, `source` columns map to passage metadata when present;
+/// null or non-string text cells are skipped (counted in `SkipStats`).
+///
+/// # Errors
+/// The file cannot be opened/parsed, no usable text column exists, or
+/// `--text-col` names a missing column.
+pub fn open(
+    path: &Path,
+    text_col: Option<&str>,
+    batch_size: usize,
+) -> Result<(RawIter, SkipStats)> {
     let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
     let builder = ParquetRecordBatchReaderBuilder::try_new(file)
         .with_context(|| format!("read parquet {}", path.display()))?;
@@ -27,7 +40,7 @@ pub fn open(path: &Path, text_col: Option<&str>) -> Result<(RawIter, SkipStats)>
         .collect();
 
     let reader = builder
-        .with_batch_size(8192)
+        .with_batch_size(batch_size)
         .build()
         .context("build parquet batch reader")?;
 
@@ -73,6 +86,11 @@ pub fn open(path: &Path, text_col: Option<&str>) -> Result<(RawIter, SkipStats)>
     Ok((Box::new(it), stats))
 }
 
+/// Resolve which column carries passage text: `text_col` when given,
+/// else the first [`TEXT_CANDIDATES`] present in `schema`.
+///
+/// # Errors
+/// The named column is absent, or no candidate column exists.
 fn resolve_text_col(
     schema: &arrow::datatypes::SchemaRef,
     text_col: Option<&str>,
@@ -159,7 +177,7 @@ mod tests {
         w.write(&batch).unwrap();
         w.close().unwrap();
 
-        let (it, _stats) = open(&path, None).unwrap();
+        let (it, _stats) = open(&path, None, 8192).unwrap();
         let rows: Vec<RawPassage> = it.collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].text, "hello world");
@@ -192,7 +210,7 @@ mod tests {
         w.write(&batch).unwrap();
         w.close().unwrap();
 
-        let (it, _) = open(&path, None).unwrap();
+        let (it, _) = open(&path, None, 8192).unwrap();
         let rows: Vec<RawPassage> = it.collect::<Result<Vec<_>>>().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "body");

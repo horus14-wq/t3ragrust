@@ -207,6 +207,40 @@ pub struct IndexArgs {
     /// Also build a learned sparse (SPLADE) leg — needs --features sparse.
     #[arg(long)]
     pub sparse: bool,
+    /// Parquet read batch size (rows per RecordBatch).
+    #[arg(long, default_value_t = 8192)]
+    pub batch_size: usize,
+    /// Tantivy writer heap in MB.
+    #[arg(long, default_value_t = 50)]
+    pub bm25_heap_mb: usize,
+    /// Tantivy indexing threads (0 = tantivy's own default).
+    #[arg(long, default_value_t = 0)]
+    pub bm25_threads: usize,
+    /// usearch HNSW connectivity (M).
+    #[arg(long, default_value_t = 16)]
+    pub connectivity: usize,
+    /// usearch expansion during index build.
+    #[arg(long, default_value_t = 128)]
+    pub expansion_add: usize,
+    /// Skip vectors.raw.f32 — halves index disk, but --exact search then
+    /// fails honestly ("built with --no-raw-vectors").
+    #[arg(long)]
+    pub no_raw_vectors: bool,
+    /// Force structural chunking for every passage (wins over --no-chunk).
+    #[arg(long)]
+    pub always_chunk: bool,
+    /// Chunk trigger in est-tokens (overrides the 7000 default).
+    #[arg(long)]
+    pub chunk_tokens: Option<usize>,
+    /// Chunk target size in chars (overrides 15000).
+    #[arg(long)]
+    pub chunk_chars: Option<usize>,
+    /// Show a progress bar on long indexes (auto-off without a tty).
+    #[arg(long, default_value_t = true, overrides_with = "no_progress")]
+    pub progress: bool,
+    /// Disable the index progress bar.
+    #[arg(long)]
+    pub no_progress: bool,
     /// ONNX execution provider. `auto` tries every compiled-in EP and
     /// silently falls back to CPU. Non-cpu choices require the matching
     /// cargo feature (ep-cuda / ep-openvino / ep-webgpu).

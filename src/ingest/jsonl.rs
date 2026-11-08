@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 use super::{RawIter, RawPassage, SkipStats};
 
+/// One JSONL record: `text` (or `output`) required, the rest optional.
 #[derive(Deserialize)]
 struct Line {
     text: Option<String>,
@@ -29,6 +30,12 @@ struct Line {
     source_idx: Option<serde_json::Value>,
 }
 
+/// Open a JSONL file for ingest: one [`Line`] per non-blank line.
+/// Malformed JSON and records without `text`/`output` are counted in
+/// `SkipStats` and skipped; only genuine I/O failures yield `Err` items.
+///
+/// # Errors
+/// The file cannot be opened.
 pub fn open(path: &Path) -> Result<(RawIter, SkipStats)> {
     let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
     let stats = SkipStats::default();
@@ -82,6 +89,7 @@ pub fn open(path: &Path) -> Result<(RawIter, SkipStats)> {
     Ok((Box::new(it), stats))
 }
 
+/// Default `source` for records lacking one: `<path>:<1-based line>`.
 fn default_source(path: &Path, lineno: usize) -> String {
     format!("{}:{}", path.display(), lineno + 1)
 }
