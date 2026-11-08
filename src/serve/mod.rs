@@ -119,12 +119,21 @@ struct SearchRequest {
     /// candidate cap — decoupled from retrieval `candidates`.
     reranker: Option<String>,
     rerank_candidates: Option<usize>,
+    /// Search ergonomics (t3-css.3.4): post-filter `key~substr`,
+    /// per-source diversity cap, text truncation, score floor, pagination.
+    filter: Option<Vec<String>>,
+    max_per_source: Option<usize>,
+    max_chars: Option<usize>,
+    min_score: Option<f32>,
+    offset: Option<usize>,
 }
 
 #[derive(Serialize)]
 struct HitOut {
     rank: usize,
     passage_id: u64,
+    /// Which corpus produced this hit (multi-corpus queries, t3-css.3.4).
+    corpus: String,
     /// Ranked score — the kind is named by `score_kind` on the response
     /// (RRF fraction pre-rerank, cross-encoder logit after).
     score: f32,
@@ -193,6 +202,29 @@ impl DaemonState {
         info!(corpus = %name, "corpus loaded");
         Ok((name, c))
     }
+}
+
+/// Resolve `--corpus` to a list: comma-separated names or `all`
+/// (t3-css.3.4). Single-corpus hits the same code path unchanged.
+fn resolve_corpora(st: &DaemonState, spec: Option<&str>) -> Result<Vec<(String, Arc<Corpus>)>> {
+    let names: Vec<String> = match spec.map(str::trim) {
+        None | Some("") => vec![newest_corpus(&st.corpora_root)?],
+        Some("all") => all_corpora(&st.corpora_root)?,
+        Some(s) => s.split(',').map(|n| n.trim().to_string()).collect(),
+    };
+    names.iter().map(|n| st.corpus(Some(n))).collect()
+}
+
+/// Every indexed corpus under the root (sorted for determinism).
+fn all_corpora(root: &std::path::Path) -> Result<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .with_context(|| format!("read {}", root.display()))?
+        .flatten()
+        .filter(|e| e.path().is_dir() && e.path().join("meta.json").exists())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    Ok(names)
 }
 
 pub fn newest_corpus(root: &std::path::Path) -> Result<String> {
@@ -376,8 +408,10 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             );
         }
     }
-    let (name, corpus) = st.corpus(req.corpus.as_deref())?;
-    tracing::debug!(corpus = %name, "stage: corpus ready");
+    // Multi-corpus (t3-css.3.4): comma-list or "all" → per-corpus legs,
+    // fused globally; hits carry their corpus name.
+    let corpora = resolve_corpora(st, req.corpus.as_deref())?;
+    tracing::debug!(n = corpora.len(), "stage: corpora ready");
     // Preset resolves to candidate/rerank defaults before explicit fields
     // (parity with the cold path's --fast/--balanced/--max).
     let (pc, pr) = match req.preset.as_deref() {
@@ -407,32 +441,56 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     };
     let embed_ms = t_embed.elapsed().as_secs_f64() * 1000.0;
     tracing::debug!("stage: embed done");
-    // MRL dims (t3-css.2.4): match the corpus's stored dims.
-    let qvec = crate::search::truncate_unit(&qvec, corpus.meta.dims as usize);
-    // --exact: brute-force scan over raw vectors (the recall oracle) instead
-    // of the ANN — forwarded through the daemon since t3-css.1.4.
+    // Multi-corpus legs (t3-css.3.4): same qvec against every corpus,
+    // per-corpus rrf, then a global merge on fused score — ids are
+    // corpus-local so hits are tagged (corpus_idx, id).
     let t_dense = Instant::now();
-    let ann = if req.exact == Some(true) {
-        corpus.dense.exact_search(&qvec, cand)?
-    } else {
-        corpus.dense.search(&qvec, cand, req.ef_search)?
-    };
-    let dense_ms = t_dense.elapsed().as_secs_f64() * 1000.0;
     let t_bm = Instant::now();
-    let bm = corpus.lex.search(&req.query, cand).unwrap_or_default();
-    let bm25_ms = t_bm.elapsed().as_secs_f64() * 1000.0;
-    // Per-leg score maps for --explain provenance (t3-css.2.1).
-    let ann_map: rustc_hash::FxHashMap<u64, f32> = ann.iter().cloned().collect();
-    let bm_map: rustc_hash::FxHashMap<u64, f32> = bm.iter().cloned().collect();
-    let mut ranked = rrf_fuse(
-        &[ann, bm],
-        req.rrf_k.unwrap_or(crate::search::RRF_K),
-        &[
-            req.dense_weight.unwrap_or(1.0),
-            req.bm25_weight.unwrap_or(1.0),
-        ],
-    );
-    tracing::debug!("stage: fused");
+    let mut dense_ms = 0f64;
+    let mut bm25_ms = 0f64;
+    /// One corpus's legs + fused ranking (t3-css.3.4).
+    struct CorpusLegs {
+        ci: usize,
+        dense_map: rustc_hash::FxHashMap<u64, f32>,
+        bm_map: rustc_hash::FxHashMap<u64, f32>,
+        fused: Vec<(u64, f32)>,
+    }
+    let mut per_corpus: Vec<CorpusLegs> = Vec::new();
+    for (ci, (_name, corpus)) in corpora.iter().enumerate() {
+        // MRL dims (t3-css.2.4): match each corpus's stored dims.
+        let qv = crate::search::truncate_unit(&qvec, corpus.meta.dims as usize);
+        let ann = if req.exact == Some(true) {
+            corpus.dense.exact_search(&qv, cand)?
+        } else {
+            corpus.dense.search(&qv, cand, req.ef_search)?
+        };
+        dense_ms += t_dense.elapsed().as_secs_f64() * 1000.0;
+        let bm = corpus.lex.search(&req.query, cand).unwrap_or_default();
+        bm25_ms += t_bm.elapsed().as_secs_f64() * 1000.0;
+        let ann_map: rustc_hash::FxHashMap<u64, f32> = ann.iter().cloned().collect();
+        let bm_map: rustc_hash::FxHashMap<u64, f32> = bm.iter().cloned().collect();
+        let fused = rrf_fuse(
+            &[ann, bm],
+            req.rrf_k.unwrap_or(crate::search::RRF_K),
+            &[
+                req.dense_weight.unwrap_or(1.0),
+                req.bm25_weight.unwrap_or(1.0),
+            ],
+        );
+        per_corpus.push(CorpusLegs {
+            ci,
+            dense_map: ann_map,
+            bm_map,
+            fused,
+        });
+    }
+    // Global merge on fused score across corpora.
+    let mut ranked: Vec<(usize, u64, f32)> = per_corpus
+        .iter()
+        .flat_map(|c| c.fused.iter().map(move |(id, s)| (c.ci, *id, *s)))
+        .collect();
+    ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    tracing::debug!(corpora = corpora.len(), "stage: fused");
 
     let mut score_kind = "rrf";
     let mut rerank_map = rustc_hash::FxHashMap::default();
@@ -451,13 +509,13 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             })
             .unwrap_or_else(|| st.reranker_default.clone());
         let rr_cand = req.rerank_candidates.unwrap_or(cand).min(cand);
-        let cand_rows: Vec<(u64, f32)> = ranked.drain(..).take(rr_cand).collect();
+        let cand_rows: Vec<(usize, u64, f32)> = ranked.drain(..).take(rr_cand).collect();
         let mut pairs = Vec::with_capacity(cand_rows.len());
         let mut ids = Vec::with_capacity(cand_rows.len());
-        for (id, _) in &cand_rows {
-            let p = corpus.reader.get(*id)?;
+        for (ci, id, _) in &cand_rows {
+            let p = corpora[*ci].1.reader.get(*id)?;
             pairs.push((req.query.clone(), p.text));
-            ids.push(*id);
+            ids.push((*ci, *id));
         }
         // Lazy per-name reranker pools; a load failure degrades to the
         // fused ranking rather than failing the query.
@@ -474,9 +532,13 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         }
         if let Some(pool) = guard.get_mut(&rr_name) {
             let scores = pool.score_pairs(&pairs)?;
-            let mut rr: Vec<(u64, f32)> = ids.into_iter().zip(scores).collect();
-            rr.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            rerank_map = rr.iter().cloned().collect();
+            let mut rr: Vec<(usize, u64, f32)> = ids
+                .into_iter()
+                .zip(scores)
+                .map(|((ci, id), s)| (ci, id, s))
+                .collect();
+            rr.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+            rerank_map = rr.iter().map(|(ci, id, s)| ((*ci, *id), *s)).collect();
             ranked = rr;
             score_kind = "rerank_logit";
         }
@@ -484,9 +546,27 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     }
     let t_hyd = Instant::now();
 
-    let mut results = Vec::new();
+    // Ergonomics (t3-css.3.4): filters/diversity/truncation/pagination.
+    let filters: Vec<(String, String)> = req
+        .filter
+        .iter()
+        .flatten()
+        .filter_map(|f| {
+            f.split_once('~')
+                .map(|(k, v)| (k.to_string(), v.to_lowercase()))
+        })
+        .collect();
+    let max_ps = req.max_per_source.unwrap_or(usize::MAX);
+    let mut per_source: rustc_hash::FxHashMap<String, usize> = Default::default();
     let mut seen = std::collections::HashSet::new();
-    for (id, score) in ranked {
+    let mut results = Vec::new();
+    for (ci, id, score) in ranked.into_iter().skip(req.offset.unwrap_or(0)) {
+        if let Some(ms) = req.min_score {
+            if score < ms {
+                continue;
+            }
+        }
+        let (_name, corpus) = &corpora[ci];
         let p = corpus.reader.get(id)?;
         let parent = if p.parent_id != p.id {
             corpus.reader.get(p.parent_id)?
@@ -496,16 +576,45 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         if !seen.insert(parent.id) {
             continue;
         }
-        // Explain mode (t3-css.2.1): per-leg scores by *chunk* id (the id
-        // that actually ranked), so provenance survives parent hydration.
+        // Post-filters: substring match on source/title/question.
+        if !filters.is_empty() {
+            let ok = filters.iter().all(|(k, v)| {
+                let f = match k.as_str() {
+                    "source" => &parent.source,
+                    "title" => &parent.title,
+                    "question" => &parent.question,
+                    _ => &None,
+                };
+                f.as_deref()
+                    .map(|s| s.to_lowercase().contains(v.as_str()))
+                    .unwrap_or(false)
+            });
+            if !ok {
+                continue;
+            }
+        }
+        // Diversity: ≤ max_per_source hits per source string.
+        let src_key = parent.source.clone().unwrap_or_default();
+        if *per_source.entry(src_key).or_insert(0) >= max_ps {
+            continue;
+        }
+        *per_source
+            .get_mut(&parent.source.clone().unwrap_or_default())
+            .unwrap() += 1;
+        // Explain mode (t3-css.2.1): per-leg scores by *chunk* id.
+        let text = match req.max_chars {
+            Some(mc) if parent.text.len() > mc => parent.text.chars().take(mc).collect(),
+            _ => parent.text,
+        };
         results.push(HitOut {
             rank: results.len() + 1,
             passage_id: parent.id,
+            corpus: corpora[ci].0.clone(),
             score,
-            dense_score: ann_map.get(&id).copied(),
-            bm25_score: bm_map.get(&id).copied(),
-            rerank_score: rerank_map.get(&id).copied(),
-            text: parent.text,
+            dense_score: per_corpus[ci].dense_map.get(&id).copied(),
+            bm25_score: per_corpus[ci].bm_map.get(&id).copied(),
+            rerank_score: rerank_map.get(&(ci, id)).copied(),
+            text,
             title: parent.title,
             question: parent.question,
             source: parent.source,
@@ -528,7 +637,11 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     };
     Ok(SearchResponse {
         query: &req.query,
-        corpus: name,
+        corpus: corpora
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
         score_kind,
         results,
         stages_ms,
@@ -561,6 +674,15 @@ async fn mcp_http(
                 bm25_weight: args["bm25_weight"].as_f64().map(|v| v as f32),
                 reranker: args["reranker"].as_str().map(String::from),
                 rerank_candidates: args["rerank_candidates"].as_u64().map(|v| v as usize),
+                filter: args["filter"].as_array().map(|fs| {
+                    fs.iter()
+                        .filter_map(|f| f.as_str().map(String::from))
+                        .collect()
+                }),
+                max_per_source: args["max_per_source"].as_u64().map(|v| v as usize),
+                max_chars: args["max_chars"].as_u64().map(|v| v as usize),
+                min_score: args["min_score"].as_f64().map(|v| v as f32),
+                offset: args["offset"].as_u64().map(|v| v as usize),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))

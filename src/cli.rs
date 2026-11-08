@@ -137,7 +137,7 @@ pub struct IndexArgs {
 pub struct SearchArgs {
     /// The query text.
     pub query: String,
-    /// Corpus to search (default: most recently indexed).
+    /// Corpus to search — name, comma-list, or 'all' (default: newest).
     #[arg(long, env = "T3RAG_CORPUS")]
     pub corpus: Option<String>,
     /// Number of passages to return.
@@ -146,6 +146,21 @@ pub struct SearchArgs {
     /// Candidates fetched per retrieval leg before fusion/rerank.
     #[arg(long, default_value_t = 50, env = "T3RAG_CANDIDATES")]
     pub candidates: usize,
+    /// Post-filter: 'key~substr' (repeatable; keys: source/title/question).
+    #[arg(long)]
+    pub filter: Vec<String>,
+    /// Cap hits per source (episode diversity).
+    #[arg(long)]
+    pub max_per_source: Option<usize>,
+    /// Truncate each passage's text to N chars.
+    #[arg(long)]
+    pub max_chars: Option<usize>,
+    /// Drop hits below score.
+    #[arg(long)]
+    pub min_score: Option<f32>,
+    /// Skip the first N ranked hits (pagination).
+    #[arg(long)]
+    pub offset: Option<usize>,
     /// Enable the cross-encoder reranker (default).
     #[arg(long, overrides_with = "no_rerank")]
     pub rerank: bool,

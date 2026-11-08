@@ -167,6 +167,11 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "bm25_weight": args.bm25_weight,
             "reranker": args.reranker,
             "rerank_candidates": args.rerank_candidates,
+            "filter": args.filter,
+            "max_per_source": args.max_per_source,
+            "max_chars": args.max_chars,
+            "min_score": args.min_score,
+            "offset": args.offset,
         }))
         .context("daemon POST /search")?;
     if resp.status() != 200 {
@@ -344,6 +349,12 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
 
 fn resolve_corpus(name: Option<&str>) -> Result<std::path::PathBuf> {
     if let Some(n) = name {
+        if n == "all" || n.contains(',') {
+            anyhow::bail!(
+                "multi-corpus ('{n}') requires the daemon path — it auto-spawns; \
+                 use a single corpus name or drop --no-daemon"
+            );
+        }
         let d = paths::corpus_dir(n)?;
         if !d.exists() {
             bail!("corpus '{n}' not indexed — run: t3rag index --input <path> --name {n}");
