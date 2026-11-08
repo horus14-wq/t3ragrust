@@ -106,6 +106,11 @@ struct SearchRequest {
     preset: Option<String>,
     /// Emit per-stage latencies + score provenance (t3-css.2.1).
     explain: Option<bool>,
+    /// Runtime fusion/ANN knobs (t3-css.2.5).
+    ef_search: Option<usize>,
+    rrf_k: Option<f32>,
+    dense_weight: Option<f32>,
+    bm25_weight: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -398,7 +403,7 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     let ann = if req.exact == Some(true) {
         corpus.dense.exact_search(&qvec, cand)?
     } else {
-        corpus.dense.search(&qvec, cand)?
+        corpus.dense.search(&qvec, cand, req.ef_search)?
     };
     let dense_ms = t_dense.elapsed().as_secs_f64() * 1000.0;
     let t_bm = Instant::now();
@@ -407,7 +412,14 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     // Per-leg score maps for --explain provenance (t3-css.2.1).
     let ann_map: rustc_hash::FxHashMap<u64, f32> = ann.iter().cloned().collect();
     let bm_map: rustc_hash::FxHashMap<u64, f32> = bm.iter().cloned().collect();
-    let mut ranked = rrf_fuse(&[ann, bm]);
+    let mut ranked = rrf_fuse(
+        &[ann, bm],
+        req.rrf_k.unwrap_or(crate::search::RRF_K),
+        &[
+            req.dense_weight.unwrap_or(1.0),
+            req.bm25_weight.unwrap_or(1.0),
+        ],
+    );
     tracing::debug!("stage: fused");
 
     let mut score_kind = "rrf";
@@ -515,6 +527,10 @@ async fn mcp_http(
                 exact: args["exact"].as_bool(),
                 preset: args["preset"].as_str().map(String::from),
                 explain: args["explain"].as_bool(),
+                ef_search: args["ef_search"].as_u64().map(|v| v as usize),
+                rrf_k: args["rrf_k"].as_f64().map(|v| v as f32),
+                dense_weight: args["dense_weight"].as_f64().map(|v| v as f32),
+                bm25_weight: args["bm25_weight"].as_f64().map(|v| v as f32),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))

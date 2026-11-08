@@ -147,7 +147,12 @@ impl DenseIndex {
 
     /// ANN search; returns (passage_id, cosine_score) sorted best-first.
     /// usearch IP distance is `1 - dot`; for unit vectors that is `1 - cosine`.
-    pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(u64, f32)>> {
+    /// `ef` overrides the index's expansion_search (recall↔latency dial,
+    /// t3-css.2.5) — usearch allows changing it on viewed indexes.
+    pub fn search(&self, query: &[f32], k: usize, ef: Option<usize>) -> Result<Vec<(u64, f32)>> {
+        if let Some(ef) = ef {
+            self.index.change_expansion_search(ef);
+        }
         let m = self
             .index
             .search(query, k)

@@ -128,6 +128,18 @@ pub struct SearchArgs {
     /// Emit per-stage timings + per-leg scores in the response.
     #[arg(long)]
     pub explain: bool,
+    /// ANN ef-search override (recall↔latency dial; usearch runtime).
+    #[arg(long)]
+    pub ef_search: Option<usize>,
+    /// RRF constant k (default 60).
+    #[arg(long, default_value_t = 60.0)]
+    pub rrf_k: f32,
+    /// Dense leg weight in fusion (default 1.0).
+    #[arg(long, default_value_t = 1.0)]
+    pub dense_weight: f32,
+    /// BM25 leg weight in fusion (default 1.0).
+    #[arg(long, default_value_t = 1.0)]
+    pub bm25_weight: f32,
     /// ONNX execution provider (see `t3rag index --ep`).
     #[arg(long, value_enum, default_value_t = Ep::Auto)]
     pub ep: Ep,

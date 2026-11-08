@@ -18,7 +18,7 @@ use crate::paths;
 use crate::store::{self, PassageReader};
 
 /// RRF constant (standard k=60).
-const RRF_K: f32 = 60.0;
+pub const RRF_K: f32 = 60.0;
 
 pub struct Hit {
     pub passage_id: u64,
@@ -29,12 +29,15 @@ pub struct Hit {
     pub source: Option<String>,
 }
 
-/// Fuse ranked legs by reciprocal rank: score(d) = Σ 1/(K + rank_i(d)).
-pub fn rrf_fuse(legs: &[Vec<(u64, f32)>]) -> Vec<(u64, f32)> {
+/// Fuse ranked legs by weighted reciprocal rank (t3-css.2.5):
+/// score(d) = Σ w_leg/(rrf_k + rank_i(d)). `weights[i]` scales leg i's
+/// contribution (1.0 = equal); `rrf_k` is the standard k (60 default).
+pub fn rrf_fuse(legs: &[Vec<(u64, f32)>], rrf_k: f32, weights: &[f32]) -> Vec<(u64, f32)> {
     let mut acc: FxHashMap<u64, f32> = FxHashMap::default();
-    for leg in legs {
+    for (li, leg) in legs.iter().enumerate() {
+        let w = weights.get(li).copied().unwrap_or(1.0);
         for (rank, (id, _)) in leg.iter().enumerate() {
-            *acc.entry(*id).or_default() += 1.0 / (RRF_K + rank as f32 + 1.0);
+            *acc.entry(*id).or_default() += w / (rrf_k + rank as f32 + 1.0);
         }
     }
     let mut v: Vec<(u64, f32)> = acc.into_iter().collect();
@@ -144,6 +147,10 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "exact": args.exact,
             "preset": preset,
             "explain": args.explain,
+            "ef_search": args.ef_search,
+            "rrf_k": args.rrf_k,
+            "dense_weight": args.dense_weight,
+            "bm25_weight": args.bm25_weight,
         }))
         .context("daemon POST /search")?;
     if resp.status() != 200 {
@@ -208,13 +215,17 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     let ann = if args.exact {
         dense.exact_search(&qvec, candidates)?
     } else {
-        dense.search(&qvec, candidates)?
+        dense.search(&qvec, candidates, args.ef_search)?
     };
     let bm = lex.search(&args.query, candidates).unwrap_or_else(|e| {
         warn!("bm25 leg failed: {e:#}");
         Vec::new()
     });
-    let fused = rrf_fuse(&[ann, bm]);
+    let fused = rrf_fuse(
+        &[ann, bm],
+        args.rrf_k,
+        &[args.dense_weight, args.bm25_weight],
+    );
 
     let mut ranked: Vec<(u64, f32)> = fused;
     if rerank {
@@ -352,13 +363,13 @@ fn parse_quant(s: &str) -> Result<crate::cli::Quantization> {
 
 #[cfg(test)]
 mod tests {
-    use super::rrf_fuse;
+    use super::{rrf_fuse, RRF_K};
 
     #[test]
     fn rrf_prefers_docs_in_both_legs() {
         let dense = vec![(1u64, 0.9f32), (2, 0.8), (3, 0.7)];
         let bm25 = vec![(2u64, 5.0f32), (4, 4.0)];
-        let fused = rrf_fuse(&[dense, bm25]);
+        let fused = rrf_fuse(&[dense, bm25], RRF_K, &[1.0, 1.0]);
         assert_eq!(fused[0].0, 2, "doc in both legs should rank first");
         assert!(fused.iter().any(|(id, _)| *id == 4));
     }
