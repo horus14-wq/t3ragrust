@@ -66,6 +66,12 @@ pub(crate) fn providers_for(ep: Ep) -> Result<Vec<ExecutionProviderDispatch>> {
             #[cfg(not(feature = "ep-openvino"))]
             return Err(not_built("openvino"));
         }
+        Ep::Coreml => {
+            #[cfg(feature = "ep-coreml")]
+            eps.push(ort::ep::CoreML::default().build().error_on_failure(true));
+            #[cfg(not(feature = "ep-coreml"))]
+            return Err(not_built("coreml"));
+        }
         Ep::Webgpu => {
             #[cfg(feature = "ep-webgpu")]
             eps.push(ort::ep::WebGPU::default().build().error_on_failure(true));
@@ -128,6 +134,14 @@ impl Embedder {
             .map_err(|e| anyhow::anyhow!("optimization level: {e:?}"))?
             .with_intra_threads(intra_threads.max(1))
             .map_err(|e| anyhow::anyhow!("intra threads: {e:?}"))?
+            // Sequential transformer graphs get nothing from an inter-op
+            // thread pool — pin it to 1 so intra-op threads do the work.
+            .with_inter_threads(1)
+            .map_err(|e| anyhow::anyhow!("inter threads: {e:?}"))?
+            // Enable the memory-pattern allocator (ORT reuses buffers across
+            // runs instead of reallocating every forward).
+            .with_memory_pattern(true)
+            .map_err(|e| anyhow::anyhow!("memory pattern: {e:?}"))?
             .with_execution_providers(&eps)
             .map_err(|e| anyhow::anyhow!("execution providers: {e:?}"))?;
         let session = builder

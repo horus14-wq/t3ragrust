@@ -318,4 +318,6 @@ pub enum Ep {
     Tensorrt,
     Openvino,
     Webgpu,
+    /// Apple CoreML EP (macOS/arm64; needs --features ep-coreml).
+    Coreml,
 }

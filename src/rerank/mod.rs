@@ -78,6 +78,10 @@ impl Reranker {
             .map_err(|e| anyhow::anyhow!("optimization level: {e:?}"))?
             .with_intra_threads(intra_threads.max(1))
             .map_err(|e| anyhow::anyhow!("intra threads: {e:?}"))?
+            .with_inter_threads(1)
+            .map_err(|e| anyhow::anyhow!("inter threads: {e:?}"))?
+            .with_memory_pattern(true)
+            .map_err(|e| anyhow::anyhow!("memory pattern: {e:?}"))?
             .with_execution_providers(&eps)
             .map_err(|e| anyhow::anyhow!("execution providers: {e:?}"))?;
         let session = builder
