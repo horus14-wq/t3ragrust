@@ -6,7 +6,8 @@ description = "Rust-native retrieval over thinking traces: CLI + daemon + MCP se
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+toml = "0.8"
 clap_complete = "4"
 clap_mangen = "0.2"
 serde = { version = "1", features = ["derive"] }

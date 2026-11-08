@@ -7,15 +7,31 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "t3rag", version, about, long_about = None)]
 pub struct Cli {
+    /// Increase log verbosity (-v = debug).
+    #[arg(short, long, global = true)]
+    pub verbose: bool,
+    /// Errors only.
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+    /// Tracing filter (overrides -v/-q): e.g. `debug`, `t3rag=trace`.
+    #[arg(long, global = true, env = "T3RAG_LOG")]
+    pub log_level: Option<String>,
+    /// TOML config with flag defaults (flags win over config).
+    #[arg(long, global = true, env = "T3RAG_CONFIG")]
+    pub config: Option<PathBuf>,
     #[command(subcommand)]
     pub command: Command,
 }
 
 impl Cli {
     pub fn run(self) -> Result<()> {
+        let cfg = crate::config::load(self.config.as_deref())?;
         match self.command {
             Command::Index(args) => crate::index::run_index(args),
-            Command::Search(args) => crate::search::run_search(args),
+            Command::Search(mut args) => {
+                args.apply_config(&cfg);
+                crate::search::run_search(args)
+            }
             Command::Serve(args) => crate::serve::run_serve(args),
             Command::Mcp(args) => crate::mcp::run_mcp(args),
             Command::Eval(args) => crate::eval::run_eval(args),
@@ -82,38 +98,38 @@ pub enum Command {
 #[derive(Args)]
 pub struct IndexArgs {
     /// Corpus input: JSONL file, directory of .md/.txt, or .parquet file.
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_INPUT")]
     pub input: PathBuf,
     /// Corpus name (artifact dir under the cache root).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_NAME")]
     pub name: String,
     /// Matryoshka dims: truncate vectors to N (L2-renormed; model must be
     /// MRL-capable — Qwen3 truncates cleanly to 32..1024).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_DIMS")]
     pub dims: Option<usize>,
     /// Text column for parquet input (auto-detect: text/content/passage).
     #[arg(long)]
     pub text_col: Option<String>,
     /// Embedding model override (default: Qwen3-Embedding-0.6B ONNX).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_MODEL")]
     pub model: Option<String>,
     /// Passage instruction prefix override (e5-family `passage: `;
     /// empty for most models).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_INSTRUCTION")]
     pub instruction: Option<String>,
     /// Vector quantization for the dense index.
-    #[arg(long, value_enum, default_value_t = Quantization::I8)]
+    #[arg(long, value_enum, default_value_t = Quantization::I8, env = "T3RAG_QUANTIZATION")]
     pub quantization: Quantization,
     /// ONNX execution provider. `auto` tries every compiled-in EP and
     /// silently falls back to CPU. Non-cpu choices require the matching
     /// cargo feature (ep-cuda / ep-openvino / ep-webgpu).
-    #[arg(long, value_enum, default_value_t = Ep::Auto)]
+    #[arg(long, value_enum, default_value_t = Ep::Auto, env = "T3RAG_EP")]
     pub ep: Ep,
     /// Parallel embedding sessions (each loads its own ~600MB model copy).
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, env = "T3RAG_POOL")]
     pub pool: usize,
     /// ORT intra-op threads per session (0 = cores/pool).
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, env = "T3RAG_THREADS")]
     pub threads: usize,
 }
 
@@ -122,13 +138,13 @@ pub struct SearchArgs {
     /// The query text.
     pub query: String,
     /// Corpus to search (default: most recently indexed).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_CORPUS")]
     pub corpus: Option<String>,
     /// Number of passages to return.
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 3, env = "T3RAG_TOP_K")]
     pub top_k: usize,
     /// Candidates fetched per retrieval leg before fusion/rerank.
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 50, env = "T3RAG_CANDIDATES")]
     pub candidates: usize,
     /// Enable the cross-encoder reranker (default).
     #[arg(long, overrides_with = "no_rerank")]
@@ -139,6 +155,9 @@ pub struct SearchArgs {
     /// Emit structured JSON instead of human-readable output.
     #[arg(long)]
     pub json: bool,
+    /// Output format: text, json, jsonl, toon (compact for agents), md.
+    #[arg(long, value_enum, default_value_t = OutFmt::Text)]
+    pub format: OutFmt,
     /// Fast preset: smallest embedder, tiny/no reranker (~50-150ms).
     #[arg(long, group = "preset")]
     pub fast: bool,
@@ -149,7 +168,7 @@ pub struct SearchArgs {
     #[arg(long, group = "preset")]
     pub max: bool,
     /// Embedding model override.
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_MODEL")]
     pub model: Option<String>,
     /// Daemon usage: auto=spawn if absent, always=spawn-or-fail, never=cold
     /// in-process path. Machine output (--json) never blocks on a spawn.
@@ -163,7 +182,7 @@ pub struct SearchArgs {
     pub exact: bool,
     /// Query instruction prefix override (models are instruction-tuned;
     /// the registry default applies when unset).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_INSTRUCTION")]
     pub instruction: Option<String>,
     /// Emit per-stage timings + per-leg scores in the response.
     #[arg(long)]
@@ -181,54 +200,54 @@ pub struct SearchArgs {
     #[arg(long, default_value_t = 1.0)]
     pub bm25_weight: f32,
     /// Reranker name (registry: minilm/bge-base/bge-m3 or repo id).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_RERANKER")]
     pub reranker: Option<String>,
     /// Candidates fed to the reranker (decoupled from --candidates).
     #[arg(long)]
     pub rerank_candidates: Option<usize>,
     /// ONNX execution provider (see `t3rag index --ep`).
-    #[arg(long, value_enum, default_value_t = Ep::Auto)]
+    #[arg(long, value_enum, default_value_t = Ep::Auto, env = "T3RAG_EP")]
     pub ep: Ep,
     /// Parallel embedding sessions (query path only uses one; >1 is for
     /// concurrent workloads).
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 1, env = "T3RAG_POOL")]
     pub pool: usize,
     /// ORT intra-op threads per session (0 = cores/pool).
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, env = "T3RAG_THREADS")]
     pub threads: usize,
 }
 
 #[derive(Args)]
 pub struct ServeArgs {
     /// Port to bind on 127.0.0.1.
-    #[arg(long, default_value_t = 7317)]
+    #[arg(long, default_value_t = 7317, env = "T3RAG_PORT")]
     pub port: u16,
     /// Unload model/indexes after N seconds idle.
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_IDLE_TIMEOUT")]
     pub idle_timeout: Option<u64>,
     /// Preload a corpus at startup (repeatable; default: none until first query).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_CORPUS")]
     pub corpus: Vec<String>,
     /// Embedding model override (default: Qwen3-Embedding-0.6B ONNX).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_MODEL")]
     pub model: Option<String>,
     /// Query instruction prefix override (registry default applies when unset).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_INSTRUCTION")]
     pub instruction: Option<String>,
     /// Daemon's default reranker (registry: minilm/bge-base/bge-m3).
-    #[arg(long, default_value = "bge-m3")]
+    #[arg(long, default_value = "bge-m3", env = "T3RAG_RERANKER")]
     pub reranker: String,
     /// Reranker pair truncation cap (default 512).
     #[arg(long, default_value_t = 512)]
     pub rerank_tokens: usize,
     /// ONNX execution provider (see `t3rag index --ep`).
-    #[arg(long, value_enum, default_value_t = Ep::Auto)]
+    #[arg(long, value_enum, default_value_t = Ep::Auto, env = "T3RAG_EP")]
     pub ep: Ep,
     /// Parallel embedding sessions (inference semaphore size).
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 2, env = "T3RAG_POOL")]
     pub pool: usize,
     /// ORT intra-op threads per session (0 = cores/pool).
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, env = "T3RAG_THREADS")]
     pub threads: usize,
 }
 
@@ -242,10 +261,10 @@ pub struct McpArgs {
 #[derive(Args)]
 pub struct EvalArgs {
     /// Queries file: JSONL of {query, relevant_ids[]}.
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_QUERIES")]
     pub queries: PathBuf,
     /// Corpus to eval (repeatable — multiple = side-by-side A/B).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_CORPUS")]
     pub corpus: Vec<String>,
     /// Cross-encoder rerank.
     #[arg(long)]
@@ -268,7 +287,7 @@ pub struct BenchArgs {
     #[arg(long)]
     pub query: String,
     /// Corpus (default: newest).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_CORPUS")]
     pub corpus: Vec<String>,
     /// Warm iterations.
     #[arg(long, default_value_t = 20)]
@@ -283,27 +302,68 @@ pub struct BenchArgs {
     #[arg(long)]
     pub exact: bool,
     /// Passages to return.
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 3, env = "T3RAG_TOP_K")]
     pub top_k: usize,
     /// Fused candidates.
-    #[arg(long, default_value_t = 50)]
+    #[arg(long, default_value_t = 50, env = "T3RAG_CANDIDATES")]
     pub candidates: usize,
     /// JSON output.
     #[arg(long)]
     pub json: bool,
 }
 
+/// Output formats for `search` (t3-css.3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum OutFmt {
+    /// Human-readable blocks (default).
+    Text,
+    /// Full JSON response object.
+    Json,
+    /// One JSON object per hit.
+    Jsonl,
+    /// Compact one-line-per-hit (agent-token-optimal).
+    Toon,
+    /// Markdown hits.
+    Md,
+}
+
+impl SearchArgs {
+    /// Merge config defaults into unset Option args (flags win).
+    pub fn apply_config(&mut self, cfg: &crate::config::Config) {
+        if self.corpus.is_none() {
+            self.corpus = cfg.corpus.clone();
+        }
+        if self.model.is_none() {
+            self.model = cfg.model.clone();
+        }
+        if self.reranker.is_none() {
+            self.reranker = cfg.reranker.clone();
+        }
+        if self.instruction.is_none() {
+            self.instruction = cfg.instruction.clone();
+        }
+    }
+    /// Effective format: --format wins; --json aliases to Json.
+    pub fn out_format(&self) -> OutFmt {
+        if self.json {
+            OutFmt::Json
+        } else {
+            self.format
+        }
+    }
+}
+
 #[derive(Args)]
 pub struct StatsArgs {
     /// Corpus name (default: newest).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_CORPUS")]
     pub corpus: Option<String>,
 }
 
 #[derive(Args)]
 pub struct ExportArgs {
     /// Corpus name (default: newest).
-    #[arg(long)]
+    #[arg(long, env = "T3RAG_CORPUS")]
     pub corpus: Option<String>,
     /// Output JSONL path.
     #[arg(long)]

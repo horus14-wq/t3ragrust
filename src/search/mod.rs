@@ -8,7 +8,7 @@
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+
 use tracing::warn;
 
 use crate::cli::SearchArgs;
@@ -126,7 +126,7 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
         if let Some(base) = base {
             match thin_search(&base, &args) {
                 Ok(resp) => {
-                    print_response(&resp, args.json)?;
+                    print_response(&resp, args.out_format())?;
                     return Ok(());
                 }
                 Err(e) => warn!("daemon query failed ({e:#}); falling back to cold path"),
@@ -175,25 +175,36 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
     resp.into_json().context("parse daemon response")
 }
 
-/// Shared renderer for daemon (thin-client) results.
-fn print_response(v: &serde_json::Value, json: bool) -> Result<()> {
-    if json {
-        println!("{}", serde_json::to_string_pretty(v)?);
-        return Ok(());
-    }
-    if let Some(results) = v.get("results").and_then(|r| r.as_array()) {
-        for r in results {
-            println!(
-                "--- [{}] id={} score={:.4}",
-                r["rank"].as_u64().unwrap_or(0),
-                r["passage_id"].as_u64().unwrap_or(0),
-                r["score"].as_f64().unwrap_or(0.0)
-            );
-            if let Some(t) = r["title"].as_str() {
-                println!("title: {t}");
-            }
-            if let Some(t) = r["text"].as_str() {
-                println!("{}", t.trim());
+/// Shared renderer for daemon (thin-client) + cold results (t3-css.3.1):
+/// Text/Json/Jsonl/Toon/Md — `toon` is the agent-token-optimal compact form.
+fn print_response(v: &serde_json::Value, fmt: crate::cli::OutFmt) -> Result<()> {
+    use crate::cli::OutFmt::*;
+    match fmt {
+        Json => println!("{}", serde_json::to_string_pretty(v)?),
+        _ => {
+            let Some(results) = v.get("results").and_then(|r| r.as_array()) else {
+                return Ok(());
+            };
+            for r in results {
+                let rank = r["rank"].as_u64().unwrap_or(0);
+                let id = r["passage_id"].as_u64().unwrap_or(0);
+                let score = r["score"].as_f64().unwrap_or(0.0);
+                let title = r["title"].as_str().unwrap_or("");
+                let text = r["text"].as_str().unwrap_or("").trim();
+                match fmt {
+                    Jsonl => println!("{}", serde_json::to_string(r)?),
+                    Toon => println!("[{rank}] id={id} s={score:.3} {title} ~{}c", text.len()),
+                    Md => {
+                        println!("### [{rank}] {title} (id={id}, s={score:.3})\n\n{text}\n");
+                    }
+                    _ => {
+                        println!("--- [{rank}] id={id} score={score:.4}");
+                        if !title.is_empty() {
+                            println!("title: {title}");
+                        }
+                        println!("{text}");
+                    }
+                }
             }
         }
     }
@@ -313,51 +324,22 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
         }
     }
 
-    if args.json {
-        #[derive(Serialize)]
-        struct JHit<'a> {
-            rank: usize,
-            passage_id: u64,
-            score: f32,
-            text: &'a str,
-            title: Option<&'a str>,
-            question: Option<&'a str>,
-            source: Option<&'a str>,
-        }
-        #[derive(Serialize)]
-        struct Out<'a> {
-            query: &'a str,
-            corpus: &'a str,
-            results: Vec<JHit<'a>>,
-        }
-        let out = Out {
-            query: &args.query,
-            corpus: args.corpus.as_deref().unwrap_or("<auto>"),
-            results: hits
-                .iter()
-                .enumerate()
-                .map(|(i, h)| JHit {
-                    rank: i + 1,
-                    passage_id: h.passage_id,
-                    score: h.score,
-                    text: &h.text,
-                    title: h.title.as_deref(),
-                    question: h.question.as_deref(),
-                    source: h.source.as_deref(),
-                })
-                .collect(),
-        };
-        println!("{}", serde_json::to_string_pretty(&out)?);
-    } else {
-        for (i, h) in hits.iter().enumerate() {
-            println!("--- [{}] id={} score={:.4}", i + 1, h.passage_id, h.score);
-            if let Some(t) = &h.title {
-                println!("title: {t}");
-            }
-            println!("{}", h.text.trim());
-        }
-    }
-    Ok(())
+    // Cold path renders through the same JSON shape the daemon returns
+    // (t3-css.3.1 — one renderer for every format).
+    let v = serde_json::json!({
+        "query": args.query,
+        "corpus": args.corpus.as_deref().unwrap_or("<auto>"),
+        "results": hits.iter().enumerate().map(|(i, h)| serde_json::json!({
+            "rank": i + 1,
+            "passage_id": h.passage_id,
+            "score": h.score,
+            "text": h.text,
+            "title": h.title,
+            "question": h.question,
+            "source": h.source,
+        })).collect::<Vec<_>>(),
+    });
+    print_response(&v, args.out_format())
 }
 
 fn resolve_corpus(name: Option<&str>) -> Result<std::path::PathBuf> {
