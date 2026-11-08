@@ -168,6 +168,9 @@ impl Reranker {
             ),
         ];
         for (name, dims, is_f32) in &self.extra_inputs {
+            // Dynamic dims: batch position -> batch, every other dynamic dim
+            // -> seq (token_type_ids/position_ids are [batch, seq]). Feeding
+            // 0 here produced (batch,0) tensors — the t3-bcr {N,0,H} bug.
             let d: Vec<usize> = dims
                 .iter()
                 .enumerate()
@@ -177,7 +180,7 @@ impl Reranker {
                     } else if i == 0 {
                         batch
                     } else {
-                        0
+                        seq
                     }
                 })
                 .collect();
@@ -281,5 +284,60 @@ impl RerankerPool {
             out.extend(r?);
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// t3-bcr regression: BERT-family tokenizers (minilm) must produce
+    /// non-empty pair encodings through the same config score_pairs uses.
+    #[test]
+    fn minilm_dual_encodes_nonempty() {
+        let root = std::path::Path::new(env!("HOME"))
+            .join(".cache/huggingface/hub/models--Xenova--ms-marco-MiniLM-L-6-v2");
+        let Ok(e) = std::fs::read_dir(root.join("snapshots")) else {
+            return; // model not cached in this env — skip
+        };
+        let mut snap: Vec<_> = e.flatten().map(|d| d.path()).collect();
+        snap.sort();
+        let tok_path = snap[0].join("tokenizer.json");
+        if !tok_path.exists() {
+            return;
+        }
+        let mut t = tokenizers::Tokenizer::from_file(&tok_path).unwrap();
+        t.with_truncation(Some(tokenizers::TruncationParams {
+            max_length: 512,
+            ..Default::default()
+        }))
+        .unwrap();
+        t.with_padding(Some(tokenizers::PaddingParams {
+            pad_id: 0,
+            pad_token: "[PAD]".into(),
+            ..Default::default()
+        }));
+        let e = t
+            .encode(
+                tokenizers::EncodeInput::Dual("what is rust".into(), "rust is a language".into()),
+                true,
+            )
+            .unwrap();
+        assert!(!e.get_ids().is_empty(), "Dual encoded to empty ids");
+        let b = t
+            .encode_batch(
+                vec![
+                    tokenizers::EncodeInput::Dual("a".into(), "b".into()),
+                    tokenizers::EncodeInput::Dual(
+                        "longer query here".into(),
+                        "a somewhat longer passage text".into(),
+                    ),
+                ],
+                true,
+            )
+            .unwrap();
+        assert!(!b[0].get_ids().is_empty() && !b[1].get_ids().is_empty());
+        eprintln!(
+            "ok: lens {:?}",
+            b.iter().map(|x| x.get_ids().len()).collect::<Vec<_>>()
+        );
     }
 }
