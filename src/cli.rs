@@ -21,6 +21,10 @@ impl Cli {
             Command::Eval(args) => crate::eval::run_eval(args),
             Command::Bench(args) => crate::bench::run_bench(args),
             Command::Skill(args) => crate::skill::run_skill(args),
+            Command::List => crate::doctor::run_list(),
+            Command::Stats(args) => crate::doctor::run_stats(args.corpus),
+            Command::Doctor => crate::doctor::run_doctor(),
+            Command::Health => crate::doctor::run_health(),
         }
     }
 }
@@ -41,6 +45,14 @@ pub enum Command {
     Bench(BenchArgs),
     /// Emit or install a SKILL.md wrapper for agent discovery.
     Skill(SkillArgs),
+    /// List indexed corpora (name, docs, dims, model, size, age).
+    List,
+    /// Deep stats for one corpus (default: newest).
+    Stats(StatsArgs),
+    /// Environment sanity: SIMD, EPs, HF cache, corpora, daemon.
+    Doctor,
+    /// <50ms pre-flight check (agents ping this).
+    Health,
 }
 
 #[derive(Args)]
@@ -255,6 +267,13 @@ pub struct BenchArgs {
     /// JSON output.
     #[arg(long)]
     pub json: bool,
+}
+
+#[derive(Args)]
+pub struct StatsArgs {
+    /// Corpus name (default: newest).
+    #[arg(long)]
+    pub corpus: Option<String>,
 }
 
 #[derive(Args)]

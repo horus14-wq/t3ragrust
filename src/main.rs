@@ -1,6 +1,7 @@
 mod bench;
 mod chunk;
 mod cli;
+mod doctor;
 mod embed;
 mod eval;
 mod index;
