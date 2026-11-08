@@ -262,9 +262,19 @@ pub struct SearchArgs {
 
 #[derive(Args)]
 pub struct ServeArgs {
-    /// Port to bind on 127.0.0.1.
+    /// Port to bind.
     #[arg(long, default_value_t = 7317, env = "T3RAG_PORT")]
     pub port: u16,
+    /// Bind address (default loopback; use 0.0.0.0 only behind a firewall +
+    /// --token).
+    #[arg(long, default_value = "127.0.0.1", env = "T3RAG_BIND")]
+    pub bind: String,
+    /// Bearer token for /search and /mcp (unset = open on loopback).
+    #[arg(long, env = "T3RAG_TOKEN")]
+    pub token: Option<String>,
+    /// Max request body bytes (default 1MB).
+    #[arg(long, default_value_t = 1_048_576)]
+    pub max_body: usize,
     /// Unload model/indexes after N seconds idle.
     #[arg(long, env = "T3RAG_IDLE_TIMEOUT")]
     pub idle_timeout: Option<u64>,

@@ -94,6 +94,10 @@ struct DaemonState {
     query_cache: Mutex<QueryLru>,
     ep: crate::cli::Ep,
     threads: usize,
+    /// Bearer token for authed routes (t3-css.3.7).
+    token: Option<String>,
+    /// Total handled requests (metrics).
+    requests: std::sync::atomic::AtomicU64,
     started: Instant,
     last_used: Mutex<Instant>,
 }
@@ -278,6 +282,8 @@ async fn serve(args: ServeArgs) -> Result<()> {
         query_cache: Mutex::new(QueryLru::new(128)),
         ep: args.ep,
         threads: args.threads,
+        token: args.token.clone(),
+        requests: std::sync::atomic::AtomicU64::new(0),
         started: Instant::now(),
         last_used: Mutex::new(Instant::now()),
     });
@@ -289,14 +295,41 @@ async fn serve(args: ServeArgs) -> Result<()> {
         }
     }
 
+    // Bearer-token middleware when --token is set (t3-css.3.7): /health
+    // stays open for liveness; /search and /mcp require the token.
+    let authed = Router::new()
+        .route("/search", post(search))
+        .route("/mcp", post(mcp_http))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            |State(st): State<Arc<DaemonState>>,
+             req: axum::http::Request<axum::body::Body>,
+             next: axum::middleware::Next| async move {
+                if let Some(t) = &st.token {
+                    let ok = req
+                        .headers()
+                        .get("authorization")
+                        .and_then(|h| h.to_str().ok())
+                        .map(|h| h == format!("Bearer {t}"))
+                        .unwrap_or(false);
+                    if !ok {
+                        return StatusCode::UNAUTHORIZED.into_response();
+                    }
+                }
+                next.run(req).await
+            },
+        ));
     let app = Router::new()
         .route("/health", get(health))
         .route("/corpora", get(list_corpora))
-        .route("/search", post(search))
-        .route("/mcp", post(mcp_http))
+        .route("/metrics", get(metrics))
+        .merge(authed)
+        .layer(axum::extract::DefaultBodyLimit::max(args.max_body))
         .with_state(state.clone());
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], args.port));
+    let addr: SocketAddr = format!("{}:{}", args.bind, args.port)
+        .parse()
+        .with_context(|| format!("bad --bind {}:{}", args.bind, args.port))?;
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
@@ -414,6 +447,8 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     tracing::debug!(n = corpora.len(), "stage: corpora ready");
     // Preset resolves to candidate/rerank defaults before explicit fields
     // (parity with the cold path's --fast/--balanced/--max).
+    st.requests
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (pc, pr) = match req.preset.as_deref() {
         Some("fast") => (20, false),
         Some("max") => (100, true),
@@ -646,6 +681,15 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         results,
         stages_ms,
     })
+}
+
+/// `GET /metrics` — uptime + request counter for monitoring (t3-css.3.7).
+async fn metrics(State(st): State<Arc<DaemonState>>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "uptime_s": st.started.elapsed().as_secs(),
+        "requests_total": st.requests.load(std::sync::atomic::Ordering::Relaxed),
+        "corpora_loaded": st.corpora.read().unwrap().len(),
+    }))
 }
 
 /// `POST /mcp` — streamable-HTTP MCP endpoint (single-shot JSON-RPC;

@@ -18,9 +18,9 @@ use crate::store::{self, CorpusMeta, PassageWriter};
 pub use bm25::{Bm25Builder, Bm25Index};
 pub use dense::{DenseBuilder, DenseIndex};
 
-/// Batch knobs live on `IndexArgs` (t3-css.2.8): --embed-batch (16) and
-/// --embed-token-budget (4096 — merged-KV exports tile batch x seq^2
-/// attention masks; unbounded batches exceed ORT's 4GB tensor limit).
+// Batch knobs live on `IndexArgs` (t3-css.2.8): --embed-batch (16) and
+// --embed-token-budget (4096 — merged-KV exports tile batch x seq^2
+// attention masks; unbounded batches exceed ORT's 4GB tensor limit).
 
 /// `t3rag index` — ingest -> pack -> embed -> usearch+tantivy -> meta.json.
 ///
