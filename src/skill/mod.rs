@@ -244,4 +244,51 @@ mod tests {
         assert!(super::SKILL_MD.contains("t3rag serve"));
         assert!(super::SKILL_MD.contains("mcpServers"));
     }
+
+    /// t3-w2f AC: spec frontmatter (name + description) and the full
+    /// orient→cite loop are present in the emitted SKILL.md.
+    #[test]
+    fn skill_md_has_frontmatter_and_playbook() {
+        let md = super::SKILL_MD;
+        assert!(md.starts_with("---\nname: t3rag\n"), "frontmatter");
+        assert!(md.contains("description:"), "frontmatter description");
+        for step in [
+            "Orient",
+            "Formulate",
+            "Retrieve",
+            "Inspect",
+            "Iterate",
+            "Hydrate",
+        ] {
+            assert!(md.contains(step), "playbook step {step}");
+        }
+        // Query craft + iteration flags the playbook teaches.
+        for needle in [
+            "--format toon",
+            "--like",
+            "--exclude",
+            "--expand",
+            "--group-by",
+            "suggest",
+            "show",
+            "warnings[]",
+        ] {
+            assert!(md.contains(needle), "missing {needle}");
+        }
+    }
+
+    /// t3-w2f AC: --install into a fresh dir produces the spec layout
+    /// (<dir>/t3rag/SKILL.md + references/*).
+    #[test]
+    fn install_writes_spec_layout() {
+        let dir = std::env::temp_dir().join(format!("t3rag-skill-test-{}", std::process::id()));
+        super::install(&dir, true).expect("install");
+        let skill_md = dir.join("t3rag/SKILL.md");
+        assert!(skill_md.exists(), "SKILL.md missing");
+        let body = std::fs::read_to_string(&skill_md).unwrap();
+        assert!(body.starts_with("---\nname: t3rag"));
+        for r in ["query-craft.md", "corpora.md"] {
+            assert!(dir.join("t3rag/references").join(r).exists(), "{r} missing");
+        }
+    }
 }
