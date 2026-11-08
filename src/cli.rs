@@ -59,6 +59,7 @@ impl Cli {
             Command::Show { corpus, id } => crate::capabilities::run_show(corpus, id),
             Command::Feedback(args) => crate::capabilities::run_feedback(args),
             Command::Suggest { query, json } => crate::capabilities::run_suggest(&query, json),
+            Command::Insights { since, json } => crate::capabilities::run_insights(since, json),
             Command::Completions { shell } => crate::capabilities::run_completions(shell),
             Command::Man { dir } => crate::capabilities::run_man(&dir),
             Command::Selftest => crate::capabilities::run_selftest(),
@@ -119,6 +120,15 @@ pub enum Command {
     Suggest {
         /// The query/problem to route.
         query: String,
+        /// JSON output.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Aggregate the query log + feedback into usage insights (t3-qc4).
+    Insights {
+        /// Only include entries from the last N hours.
+        #[arg(long)]
+        since: Option<u64>,
         /// JSON output.
         #[arg(long)]
         json: bool,

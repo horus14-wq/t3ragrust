@@ -387,6 +387,114 @@ pub fn run_suggest(query: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
+/// `t3rag insights` — aggregate log.jsonl + feedback.jsonl (t3-qc4):
+/// per-corpus query volume, zero-result queries (coverage gaps), verdict
+/// distribution, latency. Reports only what the logs actually record —
+/// feature-usage telemetry needs the log schema to grow a `flags` field.
+///
+/// # Errors
+/// The cache root can't be read.
+pub fn run_insights(since_hours: Option<u64>, json_out: bool) -> Result<()> {
+    let root = paths::cache_root()?;
+    let cutoff = since_hours.map(|h| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.saturating_sub(h * 3600)
+    });
+    let read_log = |name: &str| -> Vec<serde_json::Value> {
+        std::fs::read_to_string(root.join(name))
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .collect()
+    };
+    let parse_ts = |v: &serde_json::Value| -> u64 {
+        // ts is RFC3339 or epoch secs; cheap parse: digits → epoch, else 0.
+        match &v["ts"] {
+            serde_json::Value::Number(n) => n.as_u64().unwrap_or(0),
+            serde_json::Value::String(s) => s
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .take(10)
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0),
+            _ => 0,
+        }
+    };
+    let logs: Vec<_> = read_log("log.jsonl")
+        .into_iter()
+        .filter(|v| cutoff.is_none_or(|c| parse_ts(v) >= c))
+        .collect();
+    let fb: Vec<_> = read_log("feedback.jsonl");
+
+    let mut per_corpus: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut zero_hits = 0u64;
+    let mut zero_queries: Vec<String> = Vec::new();
+    let mut total_ms = 0f64;
+    let mut clients: std::collections::BTreeMap<String, u64> = Default::default();
+    for v in &logs {
+        for c in v["corpora"].as_str().unwrap_or("").split(',') {
+            if !c.is_empty() {
+                *per_corpus.entry(c.into()).or_default() += 1;
+            }
+        }
+        *clients
+            .entry(v["client"].as_str().unwrap_or("?").into())
+            .or_default() += 1;
+        total_ms += v["took_ms"].as_f64().unwrap_or(0.0);
+        if v["top_ids"]
+            .as_array()
+            .map(|a| a.is_empty())
+            .unwrap_or(true)
+        {
+            zero_hits += 1;
+            if let Some(q) = v["query"].as_str() {
+                zero_queries.push(q.into());
+            }
+        }
+    }
+    let mut verdicts: std::collections::BTreeMap<String, u64> = Default::default();
+    for v in &fb {
+        *verdicts
+            .entry(v["verdict"].as_str().unwrap_or("?").into())
+            .or_default() += 1;
+    }
+    let report = serde_json::json!({
+        "queries": logs.len(),
+        "feedback": fb.len(),
+        "per_corpus": per_corpus,
+        "per_client": clients,
+        "zero_result_queries": zero_hits,
+        "top_zero_hit_queries": zero_queries.iter().take(10).collect::<Vec<_>>(),
+        "verdicts": verdicts,
+        "avg_took_ms": if logs.is_empty() { 0.0 } else { total_ms / logs.len() as f64 },
+    });
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "queries: {}  (zero-result: {})  avg: {:.0}ms",
+            report["queries"], report["zero_result_queries"], report["avg_took_ms"]
+        );
+        for (c, n) in &per_corpus {
+            println!("  {c:<16} {n}");
+        }
+        if !verdicts.is_empty() {
+            println!("verdicts: {verdicts:?}");
+        }
+        if !zero_queries.is_empty() {
+            println!("zero-hit queries:");
+            for q in zero_queries.iter().take(10) {
+                println!("  - {q}");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// `t3rag selftest` — alias-level sanity (same as `health`, plus a clap
 /// parse of the full arg surface so the help tree itself is proven).
 pub fn run_selftest() -> Result<()> {
