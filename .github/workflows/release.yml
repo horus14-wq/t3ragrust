@@ -16,7 +16,7 @@ jobs:
           # CPU default per OS (t3-css.4.12)
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, flavor: cpu, features: "" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: cpu, features: "" }
-          - { os: macos-14, target: aarch64-apple-darwin, flavor: cpu, features: "" }
+          - { os: macos-15, target: aarch64-apple-darwin, flavor: cpu, features: "" }
           # aarch64 Linux: ort ships a `none` (cpu) dist for this target
           # (t3-7hc). cuda13/tensorrt/nvrtx ARM-server dists also exist but
           # need real ARM GPU hardware to be useful — cpu only for now.
@@ -27,7 +27,7 @@ jobs:
           # separate artifact rather than a fat binary.
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, flavor: cuda, features: "ep-cuda" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: cuda, features: "ep-cuda" }
-          - { os: macos-14, target: aarch64-apple-darwin, flavor: coreml, features: "ep-coreml" }
+          - { os: macos-15, target: aarch64-apple-darwin, flavor: coreml, features: "ep-coreml" }
           - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu, flavor: openvino, features: "ep-openvino" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: openvino, features: "ep-openvino" }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, flavor: directml, features: "ep-directml" }
