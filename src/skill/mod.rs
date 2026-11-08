@@ -4,15 +4,102 @@
 //! the `search_traces` MCP tool + config snippets, CLI equivalents,
 //! when-to-use guidance); `--install <dir>` writes it into a skills dir.
 
-use anyhow::{bail, Result};
+use std::path::PathBuf;
+
+use anyhow::{bail, Context, Result};
 
 use crate::cli::SkillArgs;
 
-/// `t3rag skill` entry point (implemented in t3-wkp.15).
+/// The SKILL.md content: self-contained agent-facing description of t3rag.
+const SKILL_MD: &str = r##"# t3rag — thinking-trace retrieval
+
+Rust-native RAG over T3 thinking traces. Local ONNX embeddings
+(Qwen3-Embedding-0.6B) + usearch ANN + tantivy BM25 + RRF fusion +
+optional BGE-v2-m3 rerank. No API keys, no Python.
+
+## When to use
+
+Use t3rag BEFORE solving a non-trivial problem when prior reasoning
+experience might help: similar bugs, algorithm patterns, debugging
+playbooks, structural approaches. Skip it for trivial lookups — it
+returns *how problems were reasoned about*, not factual docs.
+
+## MCP tool
+
+`search_traces` — params:
+- `query` (string, required): the problem/question to find traces for
+- `top_k` (int, default 3)
+- `corpus` (string, optional): corpus name (e.g. `reflect`, `construct`,
+  `semantic`); default = most recently indexed
+- `rerank` (bool, default true)
+
+### Register (daemon HTTP MCP — shared, warm, recommended)
+
+```json
+{ "mcpServers": { "t3rag": { "url": "http://127.0.0.1:7317/mcp" } } }
+```
+
+Start the daemon once: `t3rag serve` (auto-spawn also happens on first
+stdio-proxy call).
+
+### Register (stdio proxy — for MCP clients without HTTP)
+
+```json
+{ "mcpServers": { "t3rag": { "command": "t3rag", "args": ["mcp"] } } }
+```
+
+The stdio server NEVER loads the model itself — it proxies to the
+daemon, spawning it if absent.
+
+## CLI equivalents
+
+```bash
+t3rag index --input corpus.jsonl --name mycorpus   # build a corpus
+t3rag search "query text" --corpus mycorpus        # query (daemon if up)
+t3rag search "query" --no-daemon                   # cold in-process path
+t3rag search "query" --no-rerank                   # fused order, no rerank
+t3rag search "query" --exact                       # brute-force (recall ref)
+```
+
+Input formats: JSONL (`text`/`output` + optional `question`/`title`/`source`),
+directory of .md/.txt, or .parquet (auto-detects text column, `--text-col`).
+
+## Output
+
+Top-k passages with fused/rerank scores, hydrated to whole parents
+(chunked long passages collapse back to their source doc). `--json`
+emits `{query, corpus, results:[{rank,passage_id,score,text,title,
+question,source}]}`.
+"##;
+
+/// `t3rag skill` entry point: print or install the SKILL.md wrapper.
 pub fn run_skill(args: SkillArgs) -> Result<()> {
-    bail!(
-        "not implemented: t3rag skill (install={:?}, force={})",
-        args.install,
-        args.force
-    )
+    match args.install {
+        None => {
+            print!("{SKILL_MD}");
+            Ok(())
+        }
+        Some(dir) => install(&dir, args.force),
+    }
+}
+
+fn install(dir: &PathBuf, force: bool) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let path = dir.join("SKILL.md");
+    if path.exists() && !force {
+        bail!("{} exists — pass --force to overwrite", path.display());
+    }
+    std::fs::write(&path, SKILL_MD).with_context(|| format!("write {}", path.display()))?;
+    println!("wrote {}", path.display());
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn skill_md_documents_the_tool() {
+        assert!(super::SKILL_MD.contains("search_traces"));
+        assert!(super::SKILL_MD.contains("t3rag serve"));
+        assert!(super::SKILL_MD.contains("mcpServers"));
+    }
 }
