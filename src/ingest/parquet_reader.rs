@@ -114,3 +114,87 @@ fn utf8_at(col: &ArrayRef, row: usize) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use parquet::arrow::ArrowWriter;
+    use std::sync::Arc;
+
+    /// Write a parquet with text/question/title/source columns, ingest it
+    /// back, and verify the field mapping end-to-end.
+    #[test]
+    fn parquet_roundtrip_maps_columns() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("t3rag_pq_test.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("text", DataType::Utf8, false),
+            Field::new("question", DataType::Utf8, true),
+            Field::new("title", DataType::Utf8, true),
+            Field::new("source", DataType::Utf8, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["hello world", "second doc"])),
+                Arc::new(StringArray::from(vec![
+                    Some("q1".to_string()),
+                    None::<String>,
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("t1".to_string()),
+                    Some("t2".to_string()),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("s1".to_string()),
+                    None::<String>,
+                ])),
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let (it, _stats) = open(&path, None).unwrap();
+        let rows: Vec<RawPassage> = it.collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].text, "hello world");
+        assert_eq!(rows[0].question.as_deref(), Some("q1"));
+        assert_eq!(rows[0].title.as_deref(), Some("t1"));
+        assert_eq!(rows[0].source.as_deref(), Some("s1"));
+        assert_eq!(rows[1].text, "second doc");
+        assert!(rows[1].question.is_none());
+    }
+
+    /// `content`/`passage` are accepted text-column aliases.
+    #[test]
+    fn text_col_alias_detected() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("t3rag_pq_alias.parquet");
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("content", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(arrow::array::Int64Array::from(vec![7])),
+                Arc::new(StringArray::from(vec!["body"])),
+            ],
+        )
+        .unwrap();
+        let file = std::fs::File::create(&path).unwrap();
+        let mut w = ArrowWriter::try_new(file, schema, None).unwrap();
+        w.write(&batch).unwrap();
+        w.close().unwrap();
+
+        let (it, _) = open(&path, None).unwrap();
+        let rows: Vec<RawPassage> = it.collect::<Result<Vec<_>>>().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].text, "body");
+    }
+}
