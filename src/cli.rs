@@ -456,6 +456,7 @@ pub enum DaemonMode {
 pub enum Quantization {
     I8,
     Bf16,
+    F16,
     Fp32,
 }
 

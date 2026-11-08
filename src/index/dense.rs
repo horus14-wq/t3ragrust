@@ -30,6 +30,7 @@ fn scalar_kind(q: Quantization) -> ScalarKind {
     match q {
         Quantization::I8 => ScalarKind::I8,
         Quantization::Bf16 => ScalarKind::BF16,
+        Quantization::F16 => ScalarKind::F16,
         Quantization::Fp32 => ScalarKind::F32,
     }
 }
