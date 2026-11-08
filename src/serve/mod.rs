@@ -104,24 +104,45 @@ struct SearchRequest {
     model: Option<String>,
     exact: Option<bool>,
     preset: Option<String>,
+    /// Emit per-stage latencies + score provenance (t3-css.2.1).
+    explain: Option<bool>,
 }
 
 #[derive(Serialize)]
 struct HitOut {
     rank: usize,
     passage_id: u64,
+    /// Ranked score — the kind is named by `score_kind` on the response
+    /// (RRF fraction pre-rerank, cross-encoder logit after).
     score: f32,
+    /// Per-leg scores for `--explain` (absent legs are null).
+    dense_score: Option<f32>,
+    bm25_score: Option<f32>,
+    rerank_score: Option<f32>,
     text: String,
     title: Option<String>,
     question: Option<String>,
     source: Option<String>,
 }
 
+/// Per-stage wall times in milliseconds (t3-css.2.1 `--explain`).
+#[derive(Serialize)]
+struct StageMs {
+    embed_ms: f64,
+    dense_ms: f64,
+    bm25_ms: f64,
+    rerank_ms: f64,
+    hydrate_ms: f64,
+}
+
 #[derive(Serialize)]
 struct SearchResponse<'a> {
     query: &'a str,
     corpus: String,
+    /// Which scale `score` uses: `rrf` (fused) or `rerank_logit`.
+    score_kind: &'static str,
     results: Vec<HitOut>,
+    stages_ms: Option<StageMs>,
 }
 
 impl DaemonState {
@@ -353,6 +374,7 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     let cand = req.candidates.unwrap_or(pc);
     let want_rerank = req.rerank.unwrap_or(pr);
 
+    let t_embed = Instant::now();
     let cached = st.query_cache.lock().unwrap().get(&req.query);
     let qvec = match cached {
         Some(v) => v,
@@ -368,19 +390,31 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             v
         }
     };
+    let embed_ms = t_embed.elapsed().as_secs_f64() * 1000.0;
     tracing::debug!("stage: embed done");
     // --exact: brute-force scan over raw vectors (the recall oracle) instead
     // of the ANN — forwarded through the daemon since t3-css.1.4.
+    let t_dense = Instant::now();
     let ann = if req.exact == Some(true) {
         corpus.dense.exact_search(&qvec, cand)?
     } else {
         corpus.dense.search(&qvec, cand)?
     };
+    let dense_ms = t_dense.elapsed().as_secs_f64() * 1000.0;
+    let t_bm = Instant::now();
     let bm = corpus.lex.search(&req.query, cand).unwrap_or_default();
+    let bm25_ms = t_bm.elapsed().as_secs_f64() * 1000.0;
+    // Per-leg score maps for --explain provenance (t3-css.2.1).
+    let ann_map: rustc_hash::FxHashMap<u64, f32> = ann.iter().cloned().collect();
+    let bm_map: rustc_hash::FxHashMap<u64, f32> = bm.iter().cloned().collect();
     let mut ranked = rrf_fuse(&[ann, bm]);
     tracing::debug!("stage: fused");
 
+    let mut score_kind = "rrf";
+    let mut rerank_map = rustc_hash::FxHashMap::default();
+    let mut rerank_ms = 0.0;
     if want_rerank {
+        let t_rr = Instant::now();
         let cand_rows: Vec<(u64, f32)> = ranked.drain(..).take(cand).collect();
         let mut pairs = Vec::with_capacity(cand_rows.len());
         let mut ids = Vec::with_capacity(cand_rows.len());
@@ -402,9 +436,13 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             let scores = pool.score_pairs(&pairs)?;
             let mut rr: Vec<(u64, f32)> = ids.into_iter().zip(scores).collect();
             rr.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            rerank_map = rr.iter().cloned().collect();
             ranked = rr;
+            score_kind = "rerank_logit";
         }
+        rerank_ms = t_rr.elapsed().as_secs_f64() * 1000.0;
     }
+    let t_hyd = Instant::now();
 
     let mut results = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -418,10 +456,15 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         if !seen.insert(parent.id) {
             continue;
         }
+        // Explain mode (t3-css.2.1): per-leg scores by *chunk* id (the id
+        // that actually ranked), so provenance survives parent hydration.
         results.push(HitOut {
             rank: results.len() + 1,
             passage_id: parent.id,
             score,
+            dense_score: ann_map.get(&id).copied(),
+            bm25_score: bm_map.get(&id).copied(),
+            rerank_score: rerank_map.get(&id).copied(),
             text: parent.text,
             title: parent.title,
             question: parent.question,
@@ -431,10 +474,24 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             break;
         }
     }
+    let hydrate_ms = t_hyd.elapsed().as_secs_f64() * 1000.0;
+    let stages_ms = if req.explain == Some(true) {
+        Some(StageMs {
+            embed_ms,
+            dense_ms,
+            bm25_ms,
+            rerank_ms,
+            hydrate_ms,
+        })
+    } else {
+        None
+    };
     Ok(SearchResponse {
         query: &req.query,
         corpus: name,
+        score_kind,
         results,
+        stages_ms,
     })
 }
 
@@ -457,6 +514,7 @@ async fn mcp_http(
                 model: args["model"].as_str().map(String::from),
                 exact: args["exact"].as_bool(),
                 preset: args["preset"].as_str().map(String::from),
+                explain: args["explain"].as_bool(),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))

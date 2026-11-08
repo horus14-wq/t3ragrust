@@ -143,6 +143,7 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "model": model,
             "exact": args.exact,
             "preset": preset,
+            "explain": args.explain,
         }))
         .context("daemon POST /search")?;
     if resp.status() != 200 {

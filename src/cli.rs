@@ -119,6 +119,9 @@ pub struct SearchArgs {
     /// the registry default applies when unset).
     #[arg(long)]
     pub instruction: Option<String>,
+    /// Emit per-stage timings + per-leg scores in the response.
+    #[arg(long)]
+    pub explain: bool,
     /// ONNX execution provider (see `t3rag index --ep`).
     #[arg(long, value_enum, default_value_t = Ep::Auto)]
     pub ep: Ep,

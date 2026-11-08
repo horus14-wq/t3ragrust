@@ -35,6 +35,7 @@ fn tools_list() -> Value {
                     "candidates": {"type": "integer", "default": 50, "description": "fused candidates before top_k/rerank"},
                     "rerank": {"type": "boolean", "default": true, "description": "cross-encoder rerank of fused candidates"},
                     "exact": {"type": "boolean", "default": false, "description": "brute-force exact scan instead of ANN"},
+                    "explain": {"type": "boolean", "default": false, "description": "per-stage timings + per-leg scores"},
                     "preset": {"type": "string", "enum": ["fast", "balanced", "max"], "description": "quality preset (sets candidates/rerank defaults)"},
                     "model": {"type": "string", "description": "embedding model repo override (must match the daemon's)"}
                 },
