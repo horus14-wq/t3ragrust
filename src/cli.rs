@@ -58,6 +58,7 @@ impl Cli {
             Command::Pull(args) => crate::capabilities::run_pull(args),
             Command::Show { corpus, id } => crate::capabilities::run_show(corpus, id),
             Command::Feedback(args) => crate::capabilities::run_feedback(args),
+            Command::Suggest { query, json } => crate::capabilities::run_suggest(&query, json),
             Command::Completions { shell } => crate::capabilities::run_completions(shell),
             Command::Man { dir } => crate::capabilities::run_man(&dir),
             Command::Selftest => crate::capabilities::run_selftest(),
@@ -114,6 +115,14 @@ pub enum Command {
     Publish(PublishArgs),
     /// Download a published corpus into the local corpora root.
     Pull(PullArgs),
+    /// Rank corpora for a query before searching (t3-69w).
+    Suggest {
+        /// The query/problem to route.
+        query: String,
+        /// JSON output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Record a relevance verdict on a query's hits (t3-bj5).
     Feedback(FeedbackArgs),
     /// Print one passage in full (no model needed).

@@ -323,6 +323,70 @@ pub fn run_feedback(args: crate::cli::FeedbackArgs) -> Result<()> {
     Ok(())
 }
 
+/// `t3rag suggest "<query>"` — corpus routing (t3-69w): one embed via the
+/// daemon's `/suggest`, per-corpus {transform, docs, top_terms,
+/// similarity?}. Type+stats lead — similarity is a secondary hint (T3
+/// views share a problem space). Without a daemon, prints the
+/// manifest-only table (no embedding, no similarity — honest degradation).
+///
+/// # Errors
+/// The daemon can't be reached and manifest-only output fails too.
+pub fn run_suggest(query: &str, json: bool) -> Result<()> {
+    if let Some(base) = crate::serve::discover_daemon() {
+        let mut resp = ureq::get(&format!("{base}/suggest"))
+            .query("q", query)
+            .call()
+            .context("daemon /suggest")?;
+        let v: serde_json::Value = resp.body_mut().read_json().context("parse")?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&v)?);
+            return Ok(());
+        }
+        println!("corpus           transform   docs   similarity  top-terms");
+        for r in v["corpora"].as_array().iter().flat_map(|a| a.iter()) {
+            let sim = r["similarity"]
+                .as_f64()
+                .map(|s| format!("{s:.3}"))
+                .unwrap_or_else(|| "n/a".into());
+            let terms = r["top_terms"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|t| t.as_str())
+                        .take(4)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_default();
+            println!(
+                "{:<16} {:<10} {:>5}  {:>9}  {}",
+                r["corpus"].as_str().unwrap_or("?"),
+                r["transform"].as_str().unwrap_or("?"),
+                r["docs"].as_u64().unwrap_or(0),
+                sim,
+                terms
+            );
+        }
+        println!("\nroute: --corpus <name[,name]> on the next search");
+        return Ok(());
+    }
+    // No daemon: manifest-only (no embed) — honest degradation.
+    println!("corpus           transform   docs   (no daemon — no similarity)");
+    let rd = std::fs::read_dir(paths::corpora_root()?)?;
+    for e in rd.flatten() {
+        if let Ok(meta) = crate::store::read_meta(&e.path()) {
+            let m = meta.manifest.as_ref();
+            println!(
+                "{:<16} {:<10} {:>5}",
+                e.file_name().to_string_lossy(),
+                m.map(|m| m.transform.as_str()).unwrap_or("unknown"),
+                meta.doc_count,
+            );
+        }
+    }
+    Ok(())
+}
+
 /// `t3rag selftest` — alias-level sanity (same as `health`, plus a clap
 /// parse of the full arg surface so the help tree itself is proven).
 pub fn run_selftest() -> Result<()> {

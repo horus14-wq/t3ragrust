@@ -398,6 +398,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         .route("/corpora", get(list_corpora))
         .route("/metrics", get(metrics))
         .route("/passages/{corpus}/{id}", get(passage))
+        .route("/suggest", get(suggest))
         .merge(authed)
         .layer(axum::extract::DefaultBodyLimit::max(args.max_body))
         .with_state(state.clone());
@@ -1124,6 +1125,64 @@ async fn passage(
             Json(serde_json::json!({"error": format!("{e:#}")})),
         )
             .into_response(),
+    }
+}
+
+/// `GET /suggest?q=...` — corpus routing (t3-69w): embed once, cosine vs
+/// each corpus's manifest centroid where present. Transform type +
+/// manifest stats lead the output; similarity is a secondary hint (T3
+/// views share a problem space, so centroids separate poorly).
+async fn suggest(
+    State(st): State<Arc<DaemonState>>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let Some(q) = params.get("q").cloned().filter(|q| !q.is_empty()) else {
+        return err_response("suggest requires ?q=<query>".into());
+    };
+    let result = tokio::task::spawn_blocking(move || {
+        let qv = st.embedder.embed_query(&q)?;
+        let mut rows = Vec::new();
+        let rd = std::fs::read_dir(&st.corpora_root).context("corpora root")?;
+        for e in rd.flatten() {
+            let dir = e.path();
+            let Ok(meta) = store::read_meta(&dir) else {
+                continue;
+            };
+            let m = meta.manifest.as_ref();
+            let sim = m.and_then(|m| m.centroid.as_ref()).map(|c| {
+                let n = qv.len().min(c.len());
+                let (mut dot, mut na, mut nb) = (0f32, 0f32, 0f32);
+                for i in 0..n {
+                    dot += qv[i] * c[i];
+                    na += qv[i] * qv[i];
+                    nb += c[i] * c[i];
+                }
+                dot / (na.sqrt() * nb.sqrt()).max(1e-12)
+            });
+            rows.push(serde_json::json!({
+                "corpus": e.file_name().to_string_lossy(),
+                "transform": m.map(|m| m.transform.as_str()).unwrap_or("unknown"),
+                "docs": meta.doc_count,
+                "top_terms": m.map(|m| m.top_terms.clone()).unwrap_or_default(),
+                "similarity": sim,
+            }));
+        }
+        rows.sort_by(|a, b| {
+            let bs = b["similarity"].as_f64().unwrap_or(f64::MIN);
+            let as_ = a["similarity"].as_f64().unwrap_or(f64::MIN);
+            bs.partial_cmp(&as_).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok::<_, anyhow::Error>(serde_json::json!({
+            "query": q,
+            "corpora": rows,
+            "note": "type+stats are the routing signal; similarity is a secondary hint",
+        }))
+    })
+    .await;
+    match result {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => err_response(format!("{e:#}")),
+        Err(e) => err_response(format!("suggest aborted: {e}")),
     }
 }
 
