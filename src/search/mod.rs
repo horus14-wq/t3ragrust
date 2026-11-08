@@ -71,13 +71,32 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
         });
     let fused = rrf_fuse(&[ann, bm]);
 
-    // Reranker lands in t3-wkp.10; --rerank is a no-op until then.
+    let mut ranked: Vec<(u64, f32)> = fused;
     if args.rerank {
-        warn!("reranker not implemented yet (t3-wkp.10); returning fused order");
+        // Cross-encoder rerank of the fused candidates (t3-wkp.10): hydrate
+        // candidate texts, score (query, passage) pairs, reorder by logit.
+        let cand: Vec<(u64, f32)> = ranked.into_iter().take(args.candidates).collect();
+        let pool = crate::rerank::RerankerPool::load(
+            &crate::rerank::default_spec(),
+            args.threads,
+            args.ep,
+            args.pool,
+        )?;
+        let mut pairs = Vec::with_capacity(cand.len());
+        let mut ids = Vec::with_capacity(cand.len());
+        for (id, _) in &cand {
+            let p = reader.get(*id)?;
+            pairs.push((args.query.clone(), p.text));
+            ids.push(*id);
+        }
+        let scores = pool.score_pairs(&pairs)?;
+        let mut reranked: Vec<(u64, f32)> = ids.into_iter().zip(scores).collect();
+        reranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        ranked = reranked;
     }
 
     let mut hits = Vec::new();
-    for (id, score) in fused.into_iter().take(args.top_k) {
+    for (id, score) in ranked.into_iter().take(args.top_k) {
         let p = reader.get(id)?;
         hits.push(Hit {
             passage_id: id,

@@ -11,7 +11,7 @@
 
 mod model;
 mod pool;
-mod session;
+pub(crate) mod session;
 
 pub use model::ModelSpec;
 pub use pool::EmbedderPool;

@@ -5,6 +5,7 @@ mod ingest;
 mod mcp;
 mod passage;
 mod paths;
+mod rerank;
 mod search;
 mod serve;
 mod skill;

@@ -16,7 +16,7 @@ use crate::cli::Ep;
 /// Map the `--ep` choice to a list of execution providers. `auto` registers
 /// every compiled-in EP with `error_on_failure(false)` so missing hardware
 /// just skips to CPU; explicit choices fail loudly when unavailable.
-fn providers_for(ep: Ep) -> Result<Vec<ExecutionProviderDispatch>> {
+pub(crate) fn providers_for(ep: Ep) -> Result<Vec<ExecutionProviderDispatch>> {
     fn not_built(name: &str) -> anyhow::Error {
         anyhow::anyhow!(
             "EP '{name}' not compiled into this binary — rebuild with the matching cargo feature: --features ep-{name}"
@@ -78,7 +78,7 @@ fn providers_for(ep: Ep) -> Result<Vec<ExecutionProviderDispatch>> {
 
 /// ORT allows exactly one `Environment` per process — share it across pool
 /// sessions via a lazily-initialized singleton.
-fn ort_env() -> Result<Arc<ort::environment::Environment>> {
+pub(crate) fn ort_env() -> Result<Arc<ort::environment::Environment>> {
     static ENV: OnceLock<Arc<ort::environment::Environment>> = OnceLock::new();
     if let Some(e) = ENV.get() {
         return Ok(e.clone());
@@ -302,7 +302,7 @@ fn l2_normalize(v: &mut [f32]) {
 
 /// Fetch the ONNX model + tokenizer from HF, trying candidate export names
 /// in order. Returns local cache paths.
-fn fetch_files(spec: &ModelSpec) -> Result<(PathBuf, PathBuf)> {
+pub(crate) fn fetch_files(spec: &ModelSpec) -> Result<(PathBuf, PathBuf)> {
     let api = hf_hub::api::sync::Api::new().context("init hf-hub api")?;
     let repo = api.model(spec.repo_id.clone());
 
