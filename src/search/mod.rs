@@ -150,7 +150,31 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
             }
         });
         if let Some(base) = base {
-            match thin_search(&base, &args) {
+            // --batch (t3-w4d): N independent queries through the warm
+            // daemon; one JSON result object per input line.
+            if let Some(file) = &args.batch {
+                let content = std::fs::read_to_string(file)
+                    .with_context(|| format!("read {}", file.display()))?;
+                for line in content.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let q = serde_json::from_str::<serde_json::Value>(line)
+                        .ok()
+                        .and_then(|v| v["query"].as_str().map(String::from))
+                        .unwrap_or_else(|| line.to_string());
+                    match thin_search(&base, &args, Some(&q)) {
+                        Ok(v) => println!("{}", serde_json::to_string(&v)?),
+                        Err(e) => println!(
+                            "{}",
+                            serde_json::json!({"query": q, "error": format!("{e:#}")})
+                        ),
+                    }
+                }
+                return Ok(());
+            }
+            match thin_search(&base, &args, None) {
                 Ok(resp) => {
                     print_response(&resp, args.out_format())?;
                     return Ok(());
@@ -170,7 +194,11 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
 ///
 /// # Errors
 /// The daemon returns non-200 or the body is unparseable.
-fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
+fn thin_search(
+    base: &str,
+    args: &SearchArgs,
+    query_override: Option<&str>,
+) -> Result<serde_json::Value> {
     let (model, rerank, candidates) = resolve_preset(args);
     let preset = if args.fast {
         Some("fast")
@@ -191,7 +219,7 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
     let mut resp = agent
         .post(&format!("{base}/search"))
         .send_json(serde_json::json!({
-            "query": args.query,
+            "query": query_override.unwrap_or(&args.query),
             "client": "cli",
             "corpus": args.corpus,
             "top_k": args.top_k,
@@ -334,6 +362,9 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     }
     if args.expand {
         anyhow::bail!("--expand requires the daemon path — drop --no-daemon");
+    }
+    if args.batch.is_some() {
+        anyhow::bail!("--batch requires the daemon path — drop --no-daemon");
     }
     let corpus = resolve_corpus(args.corpus.as_deref())?;
     let meta = store::read_meta(&corpus)?;

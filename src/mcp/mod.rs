@@ -65,6 +65,18 @@ fn tools_list() -> Value {
                 "required": ["query"]
             }
         }, {
+            "name": "batch_search",
+            "description": "Run N independent queries in one call — each gets its own result set (distinct from the 'queries' arg on search_traces, which fuses phrasings into ONE ranking).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "queries": {"type": "array", "items": {"type": "string"}, "description": "independent queries to run"},
+                    "corpus": {"type": "string", "description": "corpus name"},
+                    "top_k": {"type": "integer", "default": 3}
+                },
+                "required": ["queries"]
+            }
+        }, {
             "name": "get_passage",
             "description": "Fetch one passage in full (text + metadata + chunk linkage) by corpus and passage id — use after search_traces surfaces a promising hit.",
             "inputSchema": {
@@ -102,7 +114,7 @@ pub fn handle_rpc(msg: &Value, exec: &dyn Fn(&str, &Value) -> Result<Value>) -> 
         "ping" => Ok(json!({})),
         "tools/list" => Ok(tools_list()),
         "tools/call" => match msg.pointer("/params/name").and_then(Value::as_str) {
-            Some(name @ ("search_traces" | "get_passage")) => {
+            Some(name @ ("search_traces" | "get_passage" | "batch_search")) => {
                 let args = msg
                     .pointer("/params/arguments")
                     .cloned()
@@ -178,6 +190,32 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let exec = |name: &str, a: &Value| -> Result<Value> {
+        // batch_search (t3-w4d): N independent POSTs to the warm daemon.
+        if name == "batch_search" {
+            let corpus = a["corpus"].as_str().unwrap_or("");
+            let top_k = a["top_k"].as_u64().unwrap_or(3);
+            let mut out = Vec::new();
+            for q in a["queries"]
+                .as_array()
+                .map(|qs| {
+                    qs.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+            {
+                let mut resp = ureq::post(&format!("{base}/search"))
+                    .send_json(
+                        json!({"query": q, "client": "mcp", "corpus": corpus, "top_k": top_k}),
+                    )
+                    .context("daemon /search")?;
+                let v: Value = resp.body_mut().read_json().unwrap_or_default();
+                out.push(v);
+            }
+            return Ok(json!({
+                "content": [{"type": "text", "text": serde_json::to_string(&out)?}]
+            }));
+        }
         // get_passage (t3-vqd): straight GET to the daemon's route —
         // corpus defaults to the daemon's newest when omitted.
         if name == "get_passage" {

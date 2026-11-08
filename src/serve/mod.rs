@@ -108,7 +108,7 @@ struct DaemonState {
     last_used: Mutex<Instant>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct SearchRequest {
     query: String,
     /// Client self-identifies for the query log (t3-pbh):
@@ -1146,6 +1146,41 @@ async fn mcp_http(
     let msg2 = msg.clone();
     let result = tokio::task::spawn_blocking(move || {
         let exec = |name: &str, args: &serde_json::Value| -> Result<serde_json::Value> {
+            // batch_search (t3-w4d): N independent queries → array of
+            // result sets (do NOT fuse — that's the `queries` arg).
+            if name == "batch_search" {
+                let corpus = args["corpus"].as_str().map(String::from);
+                let top_k = args["top_k"].as_u64().map(|v| v as usize);
+                let qs: Vec<String> = args["queries"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .context("batch_search requires queries[]")?;
+                let mut out = Vec::with_capacity(qs.len());
+                for q in &qs {
+                    let req = SearchRequest {
+                        query: q.clone(),
+                        corpus: corpus.clone(),
+                        top_k,
+                        ..SearchRequest::default()
+                    };
+                    match do_search(&st, &req) {
+                        Ok(r) => out.push(serde_json::to_value(r)?),
+                        Err(e) => out.push(serde_json::json!({
+                            "query": q, "error": format!("{e:#}")
+                        })),
+                    }
+                }
+                return Ok(serde_json::json!({
+                    "content": [{
+                        "type": "text",
+                        "text": serde_json::to_string(&out)?
+                    }]
+                }));
+            }
             // get_passage (t3-vqd): pure store read via the loaded corpus —
             // no embed, no fusion; mirrors GET /passages/{corpus}/{id}.
             if name == "get_passage" {

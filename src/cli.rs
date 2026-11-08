@@ -257,6 +257,11 @@ pub struct SearchArgs {
     /// (chars/4 heuristic) — keeps injected context inside the window.
     #[arg(long)]
     pub token_budget: Option<usize>,
+    /// Batch mode: JSONL file of independent queries ({"query": "..."} or
+    /// a plain string per line) — one JSON result object emitted per line
+    /// (t3-w4d; daemon path).
+    #[arg(long, env = "T3RAG_BATCH")]
+    pub batch: Option<PathBuf>,
     /// Enable the cross-encoder reranker (default).
     #[arg(long, overrides_with = "no_rerank")]
     pub rerank: bool,
