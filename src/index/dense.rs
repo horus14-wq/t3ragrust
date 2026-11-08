@@ -193,20 +193,26 @@ impl DenseIndex {
                 16 + n * v2_stride
             );
         };
-        let mut scored: Vec<(u64, f32)> = Vec::with_capacity(n);
-        for i in 0..n {
-            let rec = &buf[16 + i * stride..16 + (i + 1) * stride];
-            let (id, row) = if has_id {
-                (u64::from_le_bytes(rec[0..8].try_into().unwrap()), &rec[8..])
-            } else {
-                (i as u64, rec)
-            };
-            let mut dot = 0f32;
-            for (j, &q) in query.iter().enumerate() {
-                dot += q * f32::from_le_bytes(row[j * 4..j * 4 + 4].try_into().unwrap());
-            }
-            scored.push((id, dot));
-        }
+        // Parallel row scan (t3-css.1.8/2.9): each row is an independent
+        // dims-length dot product — the recall oracle stays fast on 155K-doc
+        // corpora.
+        use rayon::prelude::*;
+        let mut scored: Vec<(u64, f32)> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let rec = &buf[16 + i * stride..16 + (i + 1) * stride];
+                let (id, row) = if has_id {
+                    (u64::from_le_bytes(rec[0..8].try_into().unwrap()), &rec[8..])
+                } else {
+                    (i as u64, rec)
+                };
+                let mut dot = 0f32;
+                for (j, &q) in query.iter().enumerate() {
+                    dot += q * f32::from_le_bytes(row[j * 4..j * 4 + 4].try_into().unwrap());
+                }
+                (id, dot)
+            })
+            .collect();
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
         Ok(scored)

@@ -5,7 +5,7 @@
 //! the only mode for now — this IS the cold in-process path the daemon and
 //! thin client will share.
 
-use std::collections::HashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
@@ -31,7 +31,7 @@ pub struct Hit {
 
 /// Fuse ranked legs by reciprocal rank: score(d) = Σ 1/(K + rank_i(d)).
 pub fn rrf_fuse(legs: &[Vec<(u64, f32)>]) -> Vec<(u64, f32)> {
-    let mut acc: HashMap<u64, f32> = HashMap::new();
+    let mut acc: FxHashMap<u64, f32> = FxHashMap::default();
     for leg in legs {
         for (rank, (id, _)) in leg.iter().enumerate() {
             *acc.entry(*id).or_default() += 1.0 / (RRF_K + rank as f32 + 1.0);
@@ -242,7 +242,7 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     // Hydrate + dedupe by parent (t3-wkp.11): a chunk hit returns its whole
     // parent passage; multiple chunks of one parent collapse to the best.
     let mut hits = Vec::new();
-    let mut seen_parents = std::collections::HashSet::new();
+    let mut seen_parents = FxHashSet::default();
     for (id, score) in ranked {
         let p = reader.get(id)?;
         let parent = if p.parent_id != p.id {
