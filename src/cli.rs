@@ -32,6 +32,11 @@ impl Cli {
                 args.apply_config(&cfg);
                 crate::search::run_search(args)
             }
+            Command::Ask(mut args) => {
+                args.apply_config(&cfg);
+                args.format = OutFmt::Prompt; // injectable context block
+                crate::search::run_search(args)
+            }
             Command::Serve(args) => crate::serve::run_serve(args),
             Command::Mcp(args) => crate::mcp::run_mcp(args),
             Command::Eval(args) => crate::eval::run_eval(args),
@@ -57,6 +62,8 @@ pub enum Command {
     Index(IndexArgs),
     /// Query a corpus: embed query, hybrid retrieve, rerank, print passages.
     Search(SearchArgs),
+    /// Query + emit an LLM-injectable context block (search --format prompt).
+    Ask(SearchArgs),
     /// Daemon: keep model + indexes resident; HTTP + streamable-HTTP MCP.
     Serve(ServeArgs),
     /// Stdio MCP server that proxies to a running daemon (never loads models).
@@ -361,6 +368,8 @@ pub enum OutFmt {
     Toon,
     /// Markdown hits.
     Md,
+    /// Prompt-injection block (the `ask` format).
+    Prompt,
 }
 
 impl SearchArgs {

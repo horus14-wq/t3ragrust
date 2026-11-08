@@ -186,6 +186,20 @@ fn print_response(v: &serde_json::Value, fmt: crate::cli::OutFmt) -> Result<()> 
     use crate::cli::OutFmt::*;
     match fmt {
         Json => println!("{}", serde_json::to_string_pretty(v)?),
+        // Prompt-injection format (t3-css.3.5): titled context blocks ready
+        // to paste into an agent's context, plus a one-line preamble.
+        Prompt => {
+            let q = v["query"].as_str().unwrap_or("");
+            println!("<retrieved-traces query=\"{q}\">");
+            if let Some(results) = v.get("results").and_then(|r| r.as_array()) {
+                for r in results {
+                    let title = r["title"].as_str().unwrap_or("trace");
+                    let text = r["text"].as_str().unwrap_or("").trim();
+                    println!("<trace title=\"{title}\">\n{text}\n</trace>");
+                }
+            }
+            println!("</retrieved-traces>");
+        }
         _ => {
             let Some(results) = v.get("results").and_then(|r| r.as_array()) else {
                 return Ok(());
