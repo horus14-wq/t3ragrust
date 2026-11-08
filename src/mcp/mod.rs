@@ -11,7 +11,6 @@
 //! initialize, notifications/initialized, ping, tools/list, tools/call.
 
 use std::io::{BufRead, Write};
-use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -121,7 +120,7 @@ pub fn tool_response(resp: &Value) -> Value {
 pub fn run_mcp(args: McpArgs) -> Result<()> {
     let base = match args.daemon_url.as_deref() {
         Some(u) => u.to_string(),
-        None => ensure_daemon()?,
+        None => crate::serve::ensure_daemon()?,
     };
     info!(%base, "mcp stdio proxy ready");
     let stdin = std::io::stdin();
@@ -169,34 +168,7 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
     Ok(())
 }
 
-/// Find the daemon, spawning `t3rag serve` if absent; poll for readiness.
-fn ensure_daemon() -> Result<String> {
-    if let Some(base) = crate::serve::discover_daemon() {
-        if ureq::get(&format!("{base}/health")).call().is_ok() {
-            return Ok(base);
-        }
-    }
-    let exe = std::env::current_exe().context("current exe")?;
-    std::process::Command::new(exe)
-        .arg("serve")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .context("spawn t3rag serve")?;
-    let deadline = Instant::now() + Duration::from_secs(180);
-    loop {
-        if Instant::now() > deadline {
-            anyhow::bail!("daemon did not become ready within 180s");
-        }
-        if let Some(base) = crate::serve::discover_daemon() {
-            if ureq::get(&format!("{base}/health")).call().is_ok() {
-                return Ok(base);
-            }
-        }
-        std::thread::sleep(Duration::from_secs(2));
-    }
-}
+// Daemon spawn/readiness lives in `serve` (shared with `search`).
 
 #[cfg(test)]
 mod tests {

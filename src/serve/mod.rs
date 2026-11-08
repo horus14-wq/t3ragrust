@@ -484,3 +484,44 @@ pub fn discover_daemon() -> Option<String> {
     }
     v.get("base_url")?.as_str().map(|s| s.to_string())
 }
+
+/// Find the daemon, spawning `t3rag serve` if absent; poll for readiness
+/// (model warmup can take ~10-60s on a cold box, longer under load).
+pub fn ensure_daemon() -> Result<String> {
+    if let Some(base) = discover_daemon() {
+        if ureq::get(&format!("{base}/health")).call().is_ok() {
+            return Ok(base);
+        }
+    }
+    spawn_daemon()?;
+    wait_for_daemon(std::time::Duration::from_secs(180))
+}
+
+/// Spawn `t3rag serve` detached (null stdio — the daemon logs to its own file).
+fn spawn_daemon() -> Result<()> {
+    let exe = std::env::current_exe().context("current exe")?;
+    std::process::Command::new(exe)
+        .arg("serve")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("spawn t3rag serve")?;
+    Ok(())
+}
+
+/// Poll `discover_daemon`+`/health` until ready or timeout.
+fn wait_for_daemon(timeout: std::time::Duration) -> Result<String> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if let Some(base) = discover_daemon() {
+            if ureq::get(&format!("{base}/health")).call().is_ok() {
+                return Ok(base);
+            }
+        }
+        if std::time::Instant::now() > deadline {
+            anyhow::bail!("daemon did not become ready within {timeout:?}");
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}

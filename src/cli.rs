@@ -101,7 +101,11 @@ pub struct SearchArgs {
     /// Embedding model override.
     #[arg(long)]
     pub model: Option<String>,
-    /// Bypass the daemon: run the cold in-process path.
+    /// Daemon usage: auto=spawn if absent, always=spawn-or-fail, never=cold
+    /// in-process path. Machine output (--json) never blocks on a spawn.
+    #[arg(long, value_enum, default_value_t = DaemonMode::Auto)]
+    pub daemon: DaemonMode,
+    /// Bypass the daemon entirely (equivalent to --daemon never).
     #[arg(long)]
     pub no_daemon: bool,
     /// Exact brute-force scan instead of ANN (recall reference).
@@ -159,6 +163,17 @@ pub struct SkillArgs {
     /// Overwrite an existing SKILL.md.
     #[arg(long)]
     pub force: bool,
+}
+
+/// Whether `t3rag search` uses the resident daemon (t3-css.1.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum DaemonMode {
+    /// Use if running; spawn if absent (default).
+    Auto,
+    /// Spawn-or-fail: error instead of cold fallback.
+    Always,
+    /// Never touch the daemon — cold in-process path.
+    Never,
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]

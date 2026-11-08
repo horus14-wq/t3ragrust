@@ -75,8 +75,33 @@ fn resolve_preset(args: &SearchArgs) -> (Option<String>, bool, usize) {
 /// falling back to the cold in-process path when no daemon is discoverable
 /// (or it errors), unless `--no-daemon` forces cold.
 pub fn run_search(args: SearchArgs) -> Result<()> {
-    if !args.no_daemon {
-        if let Some(base) = crate::serve::discover_daemon() {
+    let mode = if args.no_daemon {
+        crate::cli::DaemonMode::Never
+    } else {
+        args.daemon
+    };
+    if mode != crate::cli::DaemonMode::Never {
+        // Cass lesson: machine-format callers must not block on a daemon
+        // spawn — they only use an already-running one. Interactive output
+        // may wait through a spawn.
+        let base = crate::serve::discover_daemon().or_else(|| {
+            if args.json {
+                None
+            } else {
+                match crate::serve::ensure_daemon() {
+                    Ok(b) => Some(b),
+                    Err(e) => {
+                        if mode == crate::cli::DaemonMode::Always {
+                            warn!("daemon required but failed to start: {e:#}");
+                        } else {
+                            warn!("daemon spawn failed ({e:#}); cold path");
+                        }
+                        None
+                    }
+                }
+            }
+        });
+        if let Some(base) = base {
             match thin_search(&base, &args) {
                 Ok(resp) => {
                     print_response(&resp, args.json)?;
@@ -84,6 +109,8 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
                 }
                 Err(e) => warn!("daemon query failed ({e:#}); falling back to cold path"),
             }
+        } else if mode == crate::cli::DaemonMode::Always {
+            anyhow::bail!("--daemon always: no daemon available and spawn failed");
         }
     }
     run_cold_search(args)
