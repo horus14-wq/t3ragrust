@@ -217,6 +217,10 @@ pub struct SearchArgs {
     /// Skip the first N ranked hits (pagination).
     #[arg(long)]
     pub offset: Option<usize>,
+    /// Exclude passage ids from results (comma-list; repeatable) —
+    /// applied before top_k so the list still fills (t3-b68).
+    #[arg(long, value_delimiter = ',')]
+    pub exclude: Vec<u64>,
     /// Enable the cross-encoder reranker (default).
     #[arg(long, overrides_with = "no_rerank")]
     pub rerank: bool,

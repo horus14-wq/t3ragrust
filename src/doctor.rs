@@ -232,7 +232,7 @@ pub fn run_health() -> Result<()> {
 /// Staleness check (t3-ao9): `meta.origin` is `host:user:input-path`;
 /// warn when the input's newest mtime is newer than `meta.json`'s.
 /// Returns a ready-to-print line, or `None` when fresh/unknown.
-fn staleness_note(meta: &CorpusMeta, dir: &std::path::Path) -> Option<String> {
+pub(crate) fn staleness_note(meta: &CorpusMeta, dir: &std::path::Path) -> Option<String> {
     let origin = meta.origin.as_ref()?;
     // origin = host:user:input-path — input is last so splitn keeps colons.
     let input = origin.splitn(3, ':').nth(2)?;

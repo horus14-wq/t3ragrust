@@ -26,6 +26,7 @@ mod skill;
 #[cfg(feature = "sparse")]
 mod sparse;
 mod store;
+mod verify;
 
 use anyhow::Result;
 use clap::Parser;

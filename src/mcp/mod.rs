@@ -52,6 +52,7 @@ fn tools_list() -> Value {
                     "min_score": {"type": "number", "description": "drop hits below score"},
                     "sparse": {"type": "boolean", "default": false, "description": "add the learned SPLADE leg (corpus must have sparse.bin)"},
                     "queries": {"type": "array", "items": {"type": "string"}, "description": "extra query phrasings fused into the ranking"},
+                    "exclude": {"type": "array", "items": {"type": "integer"}, "description": "passage ids to exclude from results (iterative refinement)"},
                     "rerank_candidates": {"type": "integer", "description": "candidates fed to reranker"},
                     "preset": {"type": "string", "enum": ["fast", "balanced", "max"], "description": "quality preset (sets candidates/rerank defaults)"},
                     "model": {"type": "string", "description": "embedding model repo override (must match the daemon's)"}
@@ -204,6 +205,7 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
                 "corpus": a["corpus"].as_str(),
                 "top_k": a["top_k"].as_u64().unwrap_or(3),
                 "rerank": a["rerank"].as_bool().unwrap_or(true),
+                "exclude": a["exclude"],
             }))
             .context("daemon /search")?;
         if resp.status().as_u16() != 200 {

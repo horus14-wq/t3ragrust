@@ -204,6 +204,7 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "max_chars": args.max_chars,
             "min_score": args.min_score,
             "offset": args.offset,
+            "exclude": args.exclude,
             "sparse": args.sparse,
             "queries": args.also,
         }))
@@ -356,6 +357,8 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
 
     // Hydrate + dedupe by parent (t3-wkp.11): a chunk hit returns its whole
     // parent passage; multiple chunks of one parent collapse to the best.
+    // --exclude (t3-b68): same parent-id subtraction as the daemon path.
+    let exclude: FxHashSet<u64> = args.exclude.iter().copied().collect();
     let mut hits = Vec::new();
     let mut seen_parents = FxHashSet::default();
     for (id, score) in ranked {
@@ -365,6 +368,9 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
         } else {
             p
         };
+        if exclude.contains(&parent.id) {
+            continue;
+        }
         if !seen_parents.insert(parent.id) {
             continue;
         }
