@@ -85,7 +85,11 @@ struct DaemonState {
     corpora_root: std::path::PathBuf,
     embedder: EmbedderPool,
     embedder_repo: String,
-    reranker: Mutex<Option<RerankerPool>>,
+    /// Lazy per-name reranker pools (t3-css.2.6): a daemon may serve
+    /// minilm AND bge-m3 queries — each loads on first use.
+    rerankers: Mutex<rustc_hash::FxHashMap<String, RerankerPool>>,
+    reranker_default: String,
+    rerank_max_tokens: usize,
     corpora: RwLock<HashMap<String, Arc<Corpus>>>,
     query_cache: Mutex<QueryLru>,
     ep: crate::cli::Ep,
@@ -111,6 +115,10 @@ struct SearchRequest {
     rrf_k: Option<f32>,
     dense_weight: Option<f32>,
     bm25_weight: Option<f32>,
+    /// Reranker name (registry: minilm/bge-base/bge-m3) + its own
+    /// candidate cap — decoupled from retrieval `candidates`.
+    reranker: Option<String>,
+    rerank_candidates: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -231,7 +239,9 @@ async fn serve(args: ServeArgs) -> Result<()> {
         corpora_root: paths::corpora_root()?,
         embedder,
         embedder_repo: spec.repo_id.clone(),
-        reranker: Mutex::new(None),
+        rerankers: Mutex::new(rustc_hash::FxHashMap::default()),
+        reranker_default: args.reranker.clone(),
+        rerank_max_tokens: args.rerank_tokens,
         corpora: RwLock::new(HashMap::new()),
         query_cache: Mutex::new(QueryLru::new(128)),
         ep: args.ep,
@@ -427,7 +437,19 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     let mut rerank_ms = 0.0;
     if want_rerank {
         let t_rr = Instant::now();
-        let cand_rows: Vec<(u64, f32)> = ranked.drain(..).take(cand).collect();
+        // Preset → reranker mapping (measured: m3 ~1.2s/pair on CPU — the
+        // balanced preset uses minilm; max keeps m3).
+        let rr_name = req
+            .reranker
+            .clone()
+            .or_else(|| match req.preset.as_deref() {
+                Some("balanced") => Some("minilm".to_string()),
+                Some("max") => Some("bge-m3".to_string()),
+                _ => None,
+            })
+            .unwrap_or_else(|| st.reranker_default.clone());
+        let rr_cand = req.rerank_candidates.unwrap_or(cand).min(cand);
+        let cand_rows: Vec<(u64, f32)> = ranked.drain(..).take(rr_cand).collect();
         let mut pairs = Vec::with_capacity(cand_rows.len());
         let mut ids = Vec::with_capacity(cand_rows.len());
         for (id, _) in &cand_rows {
@@ -435,16 +457,20 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             pairs.push((req.query.clone(), p.text));
             ids.push(*id);
         }
-        // Lazy single-flight reranker load; a load failure degrades to the
+        // Lazy per-name reranker pools; a load failure degrades to the
         // fused ranking rather than failing the query.
-        let mut guard = st.reranker.lock().unwrap();
-        if guard.is_none() {
-            match RerankerPool::load(&rerank::default_spec(), st.threads, st.ep, 1) {
-                Ok(p) => *guard = Some(p),
-                Err(e) => tracing::warn!("reranker unavailable: {e:#}"),
+        let mut guard = st.rerankers.lock().unwrap();
+        if !guard.contains_key(&rr_name) {
+            match rerank::spec(&rr_name)
+                .and_then(|s| RerankerPool::load(&s, st.threads, st.ep, 1, st.rerank_max_tokens))
+            {
+                Ok(p) => {
+                    guard.insert(rr_name.clone(), p);
+                }
+                Err(e) => tracing::warn!(reranker = %rr_name, "reranker unavailable: {e:#}"),
             }
         }
-        if let Some(pool) = guard.as_mut() {
+        if let Some(pool) = guard.get_mut(&rr_name) {
             let scores = pool.score_pairs(&pairs)?;
             let mut rr: Vec<(u64, f32)> = ids.into_iter().zip(scores).collect();
             rr.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -531,6 +557,8 @@ async fn mcp_http(
                 rrf_k: args["rrf_k"].as_f64().map(|v| v as f32),
                 dense_weight: args["dense_weight"].as_f64().map(|v| v as f32),
                 bm25_weight: args["bm25_weight"].as_f64().map(|v| v as f32),
+                reranker: args["reranker"].as_str().map(String::from),
+                rerank_candidates: args["rerank_candidates"].as_u64().map(|v| v as usize),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))

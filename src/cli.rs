@@ -140,6 +140,12 @@ pub struct SearchArgs {
     /// BM25 leg weight in fusion (default 1.0).
     #[arg(long, default_value_t = 1.0)]
     pub bm25_weight: f32,
+    /// Reranker name (registry: minilm/bge-base/bge-m3 or repo id).
+    #[arg(long)]
+    pub reranker: Option<String>,
+    /// Candidates fed to the reranker (decoupled from --candidates).
+    #[arg(long)]
+    pub rerank_candidates: Option<usize>,
     /// ONNX execution provider (see `t3rag index --ep`).
     #[arg(long, value_enum, default_value_t = Ep::Auto)]
     pub ep: Ep,
@@ -169,6 +175,12 @@ pub struct ServeArgs {
     /// Query instruction prefix override (registry default applies when unset).
     #[arg(long)]
     pub instruction: Option<String>,
+    /// Daemon's default reranker (registry: minilm/bge-base/bge-m3).
+    #[arg(long, default_value = "bge-m3")]
+    pub reranker: String,
+    /// Reranker pair truncation cap (default 512).
+    #[arg(long, default_value_t = 512)]
+    pub rerank_tokens: usize,
     /// ONNX execution provider (see `t3rag index --ep`).
     #[arg(long, value_enum, default_value_t = Ep::Auto)]
     pub ep: Ep,

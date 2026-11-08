@@ -40,6 +40,8 @@ fn tools_list() -> Value {
                     "dense_weight": {"type": "number", "default": 1.0, "description": "dense leg weight"},
                     "bm25_weight": {"type": "number", "default": 1.0, "description": "lexical leg weight"},
                     "explain": {"type": "boolean", "default": false, "description": "per-stage timings + per-leg scores"},
+                    "reranker": {"type": "string", "enum": ["minilm", "bge-base", "bge-m3"], "description": "cross-encoder model"},
+                    "rerank_candidates": {"type": "integer", "description": "candidates fed to reranker"},
                     "preset": {"type": "string", "enum": ["fast", "balanced", "max"], "description": "quality preset (sets candidates/rerank defaults)"},
                     "model": {"type": "string", "description": "embedding model repo override (must match the daemon's)"}
                 },

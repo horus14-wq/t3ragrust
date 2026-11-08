@@ -151,6 +151,8 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "rrf_k": args.rrf_k,
             "dense_weight": args.dense_weight,
             "bm25_weight": args.bm25_weight,
+            "reranker": args.reranker,
+            "rerank_candidates": args.rerank_candidates,
         }))
         .context("daemon POST /search")?;
     if resp.status() != 200 {
@@ -231,12 +233,28 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     if rerank {
         // Cross-encoder rerank of the fused candidates (t3-wkp.10): hydrate
         // candidate texts, score (query, passage) pairs, reorder by logit.
-        let cand: Vec<(u64, f32)> = ranked.into_iter().take(candidates).collect();
+        // t3-css.2.6: reranker registry + decoupled candidate cap.
+        let rr_name = args
+            .reranker
+            .clone()
+            .or_else(|| {
+                if args.balanced {
+                    Some("minilm".to_string())
+                } else if args.max {
+                    Some("bge-m3".to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "bge-m3".to_string());
+        let rr_cand = args.rerank_candidates.unwrap_or(candidates).min(candidates);
+        let cand: Vec<(u64, f32)> = ranked.into_iter().take(rr_cand).collect();
         let pool = crate::rerank::RerankerPool::load(
-            &crate::rerank::default_spec(),
+            &crate::rerank::spec(&rr_name)?,
             args.threads,
             args.ep,
             args.pool,
+            crate::rerank::RERANK_MAX_TOKENS,
         )?;
         let mut pairs = Vec::with_capacity(cand.len());
         let mut ids = Vec::with_capacity(cand.len());

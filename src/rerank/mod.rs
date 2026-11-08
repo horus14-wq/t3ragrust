@@ -23,12 +23,38 @@ use crate::embed::ModelSpec;
 
 /// Pairs are truncated to this length — reranking reads the whole passage
 /// only for the final top-few, so head-truncation is the speed/quality sweet spot.
-const RERANK_MAX_TOKENS: usize = 512;
+/// Pair truncation cap (`--rerank-tokens` overrides via `Reranker::load`).
+pub const RERANK_MAX_TOKENS: usize = 512;
 const PAD_ID: u32 = 1; // XLM-RoBERTa pad token
 
 /// Default reranker model: BGE-v2-m3 ONNX (multilingual, strong cross-encoder).
-pub fn default_spec() -> ModelSpec {
-    ModelSpec::for_hf_repo("onnx-community/bge-reranker-v2-m3-ONNX")
+/// Reranker registry (t3-css.2.6) — measured on this box: bge-m3 (568M)
+/// costs ~1.2s per scored pair on CPU (~12s per 10-candidate rerank),
+/// MiniLM-L-6-v2 (~33M) is ~15-20× faster. Verified ONNX repos only;
+/// each follows the onnx-community/temsa layout the loader assumes.
+pub fn spec(name: &str) -> Result<ModelSpec> {
+    match name {
+        // temsa's cpu-qint8 and keisuke's int8 exports both reject padded
+        // pair batches ({25,0,384} Gather mismatch — their tokenizer.json
+        // lacks the BERT post-processor our Dual encoding needs). Xenova's
+        // transformers.js export is the canonical MiniLM reranker build.
+        "minilm" | "ms-marco" | "ms-marco-minilm" => {
+            Ok(ModelSpec::for_hf_repo("Xenova/ms-marco-MiniLM-L-6-v2"))
+        }
+        _ => {
+            let repo = match name {
+                "bge-base" | "bge-reranker-base" => "onnx-community/bge-reranker-base-ONNX",
+                "m3" | "bge-m3" | "bge-reranker-v2-m3" | "default" => {
+                    "onnx-community/bge-reranker-v2-m3-ONNX"
+                }
+                other if other.contains('/') => other, // treat as a raw repo id
+                other => {
+                    anyhow::bail!("unknown reranker '{other}' (known: minilm, bge-base, bge-m3)")
+                }
+            };
+            Ok(ModelSpec::for_hf_repo(repo))
+        }
+    }
 }
 
 /// A loaded cross-encoder session. Same concurrency model as [`crate::embed::Embedder`].
@@ -41,7 +67,7 @@ pub struct Reranker {
 }
 
 impl Reranker {
-    pub fn load(spec: &ModelSpec, intra_threads: usize, ep: Ep) -> Result<Self> {
+    pub fn load(spec: &ModelSpec, intra_threads: usize, ep: Ep, max_tokens: usize) -> Result<Self> {
         let eps = crate::embed::session::providers_for(ep)?;
         let (onnx_path, tokenizer_path) = fetch_files(spec)?;
         let env = ort_env()?;
@@ -80,7 +106,7 @@ impl Reranker {
             .map_err(|e| anyhow::anyhow!("load tokenizer {}: {e}", tokenizer_path.display()))?;
         tokenizer
             .with_truncation(Some(TruncationParams {
-                max_length: RERANK_MAX_TOKENS,
+                max_length: max_tokens,
                 ..Default::default()
             }))
             .map_err(|e| anyhow::anyhow!("set truncation: {e}"))?;
@@ -192,7 +218,13 @@ pub struct RerankerPool {
 }
 
 impl RerankerPool {
-    pub fn load(spec: &ModelSpec, threads: usize, ep: Ep, size: usize) -> Result<Self> {
+    pub fn load(
+        spec: &ModelSpec,
+        threads: usize,
+        ep: Ep,
+        size: usize,
+        max_tokens: usize,
+    ) -> Result<Self> {
         let size = size.max(1);
         let per = if threads == 0 {
             (std::thread::available_parallelism()
@@ -206,7 +238,7 @@ impl RerankerPool {
         let mut sessions = Vec::with_capacity(size);
         for i in 0..size {
             sessions.push(Mutex::new(
-                Reranker::load(spec, per, ep)
+                Reranker::load(spec, per, ep, max_tokens)
                     .with_context(|| format!("load reranker session {i}"))?,
             ));
         }
