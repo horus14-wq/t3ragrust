@@ -206,6 +206,12 @@ pub struct IndexArgs {
     /// Disable structural chunking (A/B eval control).
     #[arg(long)]
     pub no_chunk: bool,
+    /// Incremental update (t3-css.4.1): rebuild the corpus but reuse
+    /// stored vectors for unchanged passage texts — only new/edited
+    /// rows get embedded. Requires an existing compatible corpus
+    /// (same model/dims/instruction, raw vectors present).
+    #[arg(long)]
+    pub update: bool,
     /// Count/ingest only — no embeddings or index writes.
     #[arg(long)]
     pub dry_run: bool,

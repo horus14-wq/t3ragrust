@@ -2,6 +2,7 @@
 //! (t3-wkp.6, t3-wkp.7, t3-wkp.8).
 
 pub mod bm25;
+mod cache;
 pub mod dense;
 
 use std::io::IsTerminal;
@@ -66,6 +67,43 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     let emb = EmbedderPool::load(&spec, args.threads, args.ep, args.pool)?;
     info!(dims = emb.dims(), "embedder ready");
 
+    // --update (t3-css.4.1): verify the existing corpus is compatible
+    // and build the text-hash -> vector reuse cache. Every store is
+    // still rebuilt fresh through the normal pipeline — only embedding
+    // is skipped for unchanged texts, which is the dominant cost.
+    let mut vec_cache = None;
+    let mut cache_hits = 0u64;
+    let mut cache_misses = 0u64;
+    let mut update_dims = None;
+    if args.update {
+        let dir = paths::corpus_dir(&args.name)?;
+        let meta =
+            store::read_meta(&dir).context("--update requires an existing indexed corpus")?;
+        let dims = args.dims.unwrap_or(meta.dims as usize);
+        if dims as u32 != meta.dims {
+            bail!("--update --dims {dims} != corpus dims {}", meta.dims);
+        }
+        if meta.model != spec.repo_id {
+            bail!(
+                "--update model {} != corpus model {} — re-index fully",
+                spec.repo_id,
+                meta.model
+            );
+        }
+        if meta.instruction.as_deref().unwrap_or("") != spec.passage_instruction.as_str() {
+            bail!("--update instruction differs from corpus — re-index fully");
+        }
+        if args.sparse || dir.join("sparse.bin").exists() {
+            bail!("--update does not support sparse corpora — re-index fully");
+        }
+        let built = cache::VectorCache::build(&dir, dims)
+            .context("read existing corpus vectors")?
+            .context("--update needs vectors.raw.f32 — corpus was built with --no-raw-vectors")?;
+        info!(entries = built.entries, "vector cache loaded");
+        vec_cache = Some(built);
+        update_dims = Some(dims);
+    }
+
     let dir = paths::corpus_dir(&args.name)?;
     let build_dir = dir.with_file_name(format!("{}.build-{}", args.name, now_ts()));
     std::fs::create_dir_all(&build_dir)
@@ -75,7 +113,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     let mut lex = Bm25Builder::create(&build_dir, args.bm25_heap_mb, args.bm25_threads)?;
     // Matryoshka truncation (t3-css.2.4): --dims stores only the leading N
     // dims (re-normalized); query vectors truncate the same way.
-    let store_dims = args.dims.unwrap_or_else(|| emb.dims());
+    let store_dims = update_dims.or(args.dims).unwrap_or_else(|| emb.dims());
     let mut dense = DenseBuilder::create(
         &build_dir,
         store_dims,
@@ -186,6 +224,9 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
                         store_dims,
                         &mut sparse_sink,
                         &mut manifest,
+                        vec_cache.as_ref(),
+                        &mut cache_hits,
+                        &mut cache_misses,
                     )?;
                     batch_tokens = 0;
                 }
@@ -211,6 +252,9 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
                 store_dims,
                 &mut sparse_sink,
                 &mut manifest,
+                vec_cache.as_ref(),
+                &mut cache_hits,
+                &mut cache_misses,
             )?;
             batch_tokens = 0;
             if next_id % 1024 < args.embed_batch as u64 {
@@ -227,6 +271,9 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         store_dims,
         &mut sparse_sink,
         &mut manifest,
+        vec_cache.as_ref(),
+        &mut cache_hits,
+        &mut cache_misses,
     )?;
     pb.finish_and_clear();
     if chunked > 0 {
@@ -266,6 +313,9 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
             "dedup": args.dedup,
             "no_chunk": args.no_chunk,
             "chunked_parents": chunked,
+            "update": args.update,
+            "vector_cache_hits": cache_hits,
+            "vector_cache_misses": cache_misses,
         })),
     };
     store::write_meta(&build_dir, &meta)?;
@@ -292,6 +342,12 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         dir.display(),
         t0.elapsed()
     );
+    if args.update {
+        println!(
+            "update: {} vectors reused, {} embedded",
+            cache_hits, cache_misses
+        );
+    }
     Ok(())
 }
 
@@ -304,7 +360,9 @@ struct SparseSink;
 
 /// Embed one drained batch and fan results out to the dense builder,
 /// sparse sink, and manifest centroid accumulator. No-op on empty
-/// batches.
+/// batches. With `vec_cache` (--update, t3-css.4.1) texts whose hash
+/// hits the previous corpus's stored vectors skip the embedder.
+#[allow(clippy::too_many_arguments)]
 fn flush_batch(
     emb: &EmbedderPool,
     dense: &mut DenseBuilder,
@@ -312,19 +370,42 @@ fn flush_batch(
     store_dims: usize,
     #[allow(unused_variables)] sparse_sink: &mut Option<SparseSink>,
     manifest: &mut crate::manifest::ManifestAcc,
+    vec_cache: Option<&cache::VectorCache>,
+    hits: &mut u64,
+    misses: &mut u64,
 ) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
     }
+    // --update: partition into cache hits (vector reused verbatim —
+    // already truncated + unit-normed at original index time) and
+    // misses (the only texts that reach the embedder).
+    let mut to_embed: Vec<(u64, String)> = Vec::with_capacity(batch.len());
+    for (id, text) in batch.drain(..) {
+        match vec_cache.and_then(|c| c.get(&text)) {
+            Some(v) => {
+                *hits += 1;
+                manifest.observe_vector(v);
+                dense.add(id, v)?;
+            }
+            None => {
+                *misses += 1;
+                to_embed.push((id, text));
+            }
+        }
+    }
+    if to_embed.is_empty() {
+        return Ok(());
+    }
     // Borrowed slices (t3-css.2.9) — the batch used to clone every doc's
     // text for the embed call; `&str` references cost nothing.
-    let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
+    let texts: Vec<&str> = to_embed.iter().map(|(_, t)| t.as_str()).collect();
     let vecs = emb.embed_passages(&texts)?;
     #[cfg(feature = "sparse")]
     if let Some(sink) = sparse_sink {
-        sink.write_batch(batch.iter().map(|(i, t)| (*i, t.as_str())))?;
+        sink.write_batch(to_embed.iter().map(|(i, t)| (*i, t.as_str())))?;
     }
-    for ((id, _), v) in batch.drain(..).zip(vecs) {
+    for ((id, _), v) in to_embed.drain(..).zip(vecs) {
         let v = crate::search::truncate_unit(&v, store_dims);
         manifest.observe_vector(&v);
         dense.add(id, &v)?;

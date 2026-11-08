@@ -226,33 +226,7 @@ impl DenseIndex {
             bail!("corpus indexed with --no-raw-vectors — exact scan unavailable");
         };
         let buf = &raw[..];
-        if buf.len() < 16 {
-            bail!("corrupt {}: too small", RAW_FILE);
-        }
-        let n = u64::from_le_bytes(buf[0..8].try_into().unwrap()) as usize;
-        let dims = u64::from_le_bytes(buf[8..16].try_into().unwrap()) as usize;
-        if dims != self.dims {
-            bail!("raw blob dims {dims} != index dims {}", self.dims);
-        }
-        // Record layout differs by format version: v1 wrote bare f32 rows
-        // (id == row index); v2 writes [u64 id][f32 vec] (chunked corpora
-        // store non-embedded parents). The blob has no version field, but
-        // the two sizes can never coincide (they differ by 8·n bytes).
-        let v2_stride = 8 + dims * 4;
-        let v1_stride = dims * 4;
-        let (stride, has_id) = if buf.len() == 16 + n * v2_stride {
-            (v2_stride, true)
-        } else if buf.len() == 16 + n * v1_stride {
-            (v1_stride, false)
-        } else {
-            bail!(
-                "corrupt {}: size {} fits neither v1 ({}) nor v2 ({}) records",
-                RAW_FILE,
-                buf.len(),
-                16 + n * v1_stride,
-                16 + n * v2_stride
-            );
-        };
+        let (n, stride, has_id) = raw_layout(buf, self.dims)?;
         // Parallel row scan (t3-css.1.8/2.9): each row is an independent
         // dims-length dot product — the recall oracle stays fast on 155K-doc
         // corpora.
@@ -276,5 +250,42 @@ impl DenseIndex {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);
         Ok(scored)
+    }
+}
+
+/// Parse a `vectors.raw.f32` blob's header + detect its record layout.
+/// Returns `(n_records, stride_bytes, has_explicit_id)`.
+///
+/// Record layout differs by format version: v1 wrote bare f32 rows
+/// (id == row index); v2 writes `[u64 id][f32 vec]` (chunked corpora
+/// store non-embedded parents). The blob has no version field, but the
+/// two sizes can never coincide (they differ by 8·n bytes).
+///
+/// # Errors
+/// The blob is shorter than the 16-byte header, declares dims that
+/// don't match `dims`, or its size fits neither layout.
+pub(crate) fn raw_layout(buf: &[u8], dims: usize) -> Result<(usize, usize, bool)> {
+    if buf.len() < 16 {
+        bail!("corrupt {}: too small", RAW_FILE);
+    }
+    let n = u64::from_le_bytes(buf[0..8].try_into().unwrap()) as usize;
+    let rdims = u64::from_le_bytes(buf[8..16].try_into().unwrap()) as usize;
+    if rdims != dims {
+        bail!("raw blob dims {rdims} != index dims {dims}");
+    }
+    let v2_stride = 8 + dims * 4;
+    let v1_stride = dims * 4;
+    if buf.len() == 16 + n * v2_stride {
+        Ok((n, v2_stride, true))
+    } else if buf.len() == 16 + n * v1_stride {
+        Ok((n, v1_stride, false))
+    } else {
+        bail!(
+            "corrupt {}: size {} fits neither v1 ({}) nor v2 ({}) records",
+            RAW_FILE,
+            buf.len(),
+            16 + n * v1_stride,
+            16 + n * v2_stride
+        )
     }
 }
