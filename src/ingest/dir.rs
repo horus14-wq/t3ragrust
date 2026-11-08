@@ -14,8 +14,15 @@ pub fn open(dir: &Path) -> Result<(RawIter, SkipStats)> {
     files.sort();
     let stats = SkipStats::default();
     let st = stats.clone();
-    let it = files.into_iter().filter_map(move |path| {
-        match read_one(&path) {
+    // Parallel read (t3-css.2.9): rayon over the sorted path list —
+    // order is preserved by par_iter's collect, keeping doc ids stable.
+    use rayon::prelude::*;
+    let results: Vec<_> = files
+        .par_iter()
+        .map(|path| (path.clone(), read_one(path)))
+        .collect();
+    let it = results.into_iter().filter_map(move |(path, r)| {
+        match r {
             Ok((text, title)) => {
                 st.record_read(text.len() as u64);
                 Some(Ok(RawPassage {

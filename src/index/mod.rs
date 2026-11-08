@@ -165,7 +165,9 @@ fn flush_batch(
     if batch.is_empty() {
         return Ok(());
     }
-    let texts: Vec<String> = batch.iter().map(|(_, t)| t.clone()).collect();
+    // Borrowed slices (t3-css.2.9) — the batch used to clone every doc's
+    // text for the embed call; `&str` references cost nothing.
+    let texts: Vec<&str> = batch.iter().map(|(_, t)| t.as_str()).collect();
     let vecs = emb.embed_passages(&texts)?;
     for ((id, _), v) in batch.drain(..).zip(vecs) {
         dense.add(id, &v)?;

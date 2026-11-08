@@ -51,7 +51,7 @@ impl EmbedderPool {
 
     /// Embed a batch of passages, split across pool sessions and run
     /// concurrently; results stay in input order.
-    pub fn embed_passages(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    pub fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -60,7 +60,7 @@ impl EmbedderPool {
         }
         let n = self.embedders.len().min(texts.len());
         let chunk = texts.len().div_ceil(n);
-        let chunks: Vec<&[String]> = texts.chunks(chunk).take(n).collect();
+        let chunks: Vec<&[&str]> = texts.chunks(chunk).take(n).collect();
         let mut results: Vec<Result<Vec<Vec<f32>>>> = Vec::with_capacity(chunks.len());
         std::thread::scope(|s| {
             let handles: Vec<_> = chunks

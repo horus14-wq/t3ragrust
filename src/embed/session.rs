@@ -202,7 +202,7 @@ impl Embedder {
             kv_inputs,
         };
         // Probe dims with a trivial forward pass (also serves as warmup).
-        let probe = emb.forward_batch(&["t3rag warmup".to_string()])?;
+        let probe = emb.forward_batch(&["t3rag warmup"])?;
         emb.dims = probe[0].len();
         if spec.dims != 0 && spec.dims != emb.dims {
             bail!(
@@ -222,12 +222,14 @@ impl Embedder {
     /// Embed one retrieval query (instruction prefix applied).
     pub fn embed_query(&mut self, query: &str) -> Result<Vec<f32>> {
         let input = format!("{}{}", self.instruction, query);
-        Ok(self.forward_batch(&[input])?.remove(0))
+        Ok(self.forward_batch(&[input.as_str()])?.remove(0))
     }
 
     /// Embed a batch of passages — the spec's passage prefix applies
     /// (e5-family `passage: `; empty for most models). Caller batches.
-    pub fn embed_passages(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    /// `&[&str]` (t3-css.2.9): the index path used to clone every doc's
+    /// text into a `Vec<String>` — borrowed slices cost nothing.
+    pub fn embed_passages(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
@@ -238,15 +240,15 @@ impl Embedder {
             .iter()
             .map(|t| format!("{}{t}", self.passage_instruction))
             .collect();
-        self.forward_batch(&prefixed)
+        self.forward_batch(&prefixed.iter().map(String::as_str).collect::<Vec<_>>())
     }
 
     /// Tokenize+pad a batch, run the ONNX forward pass, last-token-pool each
     /// sequence, L2-normalize. Returns one unit vector per input.
-    fn forward_batch(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    fn forward_batch(&mut self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         let encodings = self
             .tokenizer
-            .encode_batch(texts.iter().map(String::as_str).collect::<Vec<_>>(), true)
+            .encode_batch(texts.to_vec(), true)
             .map_err(|e| anyhow::anyhow!("tokenize batch: {e}"))?;
         let batch = encodings.len();
         let seq = encodings
