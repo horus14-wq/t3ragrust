@@ -89,3 +89,65 @@ inline ONNX Runtime sessions:
 - **Prebuild everything before renting.** Ship the binary and plugin libs,
   and use a startup script that downloads data and starts indexing on its
   own. That way the paid box starts useful work within ~3 minutes of launch.
+
+---
+
+## Sharded indexing + merge (use every GPU on one corpus)
+
+**Status:** idea.
+
+### Why
+
+On the 2026-11-08 run, one corpus ran on one GPU. When `reflect` finished at
+13:47, GPU 0 sat idle for over an hour while `raw-chunked` (~87K chunks at
+~9.5 chunks/s) finished alone on GPU 1. Splitting a corpus across N GPUs and
+merging the pieces would cut wall-clock time for the largest corpus by about
+N×. That is also where most of the rental cost goes.
+
+### Why t3rag can't do it today
+
+- An index is built in **one pass**, writing a single ID-numbered passage store
+  (`passages.bin/.idx`), one usearch ANN graph (`vectors.usearch`), one raw
+  vector blob (`vectors.raw.f32`), one Tantivy BM25 index (`bm25/`), and one
+  `meta.json` (doc count, manifest). There is no merge step.
+- `--update` reuses vectors only from **one earlier version of the same corpus**,
+  matched by passage text. It can't pull vectors from a second, parallel
+  run, so a final `--update` pass would re-embed whatever the first build lacks.
+- A running `t3rag index` owns its input queue, so work can't be handed to
+  another GPU mid-run.
+
+### Sketch
+
+1. **Shard:** `t3rag index --shard i/N` (or split the input file) indexes every
+   N-th passage, or a contiguous slice, into `<name>.shard-i`. Run one process
+   per GPU, each pinned with `CUDA_VISIBLE_DEVICES`.
+2. **Merge:** `t3rag merge <name> <name>.shard-0 ... <name>.shard-N-1`:
+   - Concatenate passage stores and **renumber IDs** with a fixed offset per
+     shard. Keep parent/chunk links consistent, since chunk hits hydrate to
+     their parent.
+   - Concatenate `vectors.raw.f32` (v2 records carry the ID, so rewrite IDs)
+     and **rebuild the usearch graph** from the raw vectors. This is CPU-only
+     and fast compared with embedding.
+   - Merge Tantivy indexes, either by adding the shards' segments with remapped
+     doc IDs or by re-indexing BM25 from the merged passage store. Re-indexing
+     is simpler and BM25 is cheap.
+   - Recompute `meta.json`: doc count, combined manifest (merge the
+     accumulators), and the model/dims/quantization compatibility check
+     across shards.
+3. **Refuse to merge** shards built with different models, dims,
+   quantization, chunk settings, or t3rag versions.
+
+### Cheaper first step
+
+Let `--update` take vectors from **several** compatible corpora
+(`--reuse-from a,b`). Each shard's vectors would then fill the text-keyed
+vector cache, and one final CPU-side `index --update` over the full input
+rebuilds a single consistent corpus without re-embedding anything. This avoids
+writing a true merge but still re-runs BM25, ANN, and passage-store builds on
+one machine.
+
+### Measured numbers behind this
+
+At ~9.5 chunks/s on one 4090, `raw-chunked` took ~2.5 h. With a two-way
+shard on the same 2×4090 box it would have taken ~1.25 h plus a merge
+(estimated minutes, not measured), saving about $1 at $0.98/h.
