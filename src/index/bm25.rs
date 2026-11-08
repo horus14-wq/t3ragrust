@@ -114,15 +114,26 @@ impl Bm25Index {
     }
 
     /// BM25 top-k; returns (passage_id, bm25_score). Callers consume ranks.
+    ///
+    /// Natural-language queries often contain QueryParser metacharacters
+    /// (`:`, `"`, `-`, `&&`) — t3-css.1.7: a parse failure falls back to a
+    /// literal bag-of-terms instead of dying (or silently zeroing the leg).
     pub fn search(&self, query_str: &str, k: usize) -> Result<Vec<(u64, f32)>> {
         let searcher = self.reader.searcher();
         let qp = QueryParser::for_index(
             &self.index,
             vec![self.fields.text, self.fields.title, self.fields.question],
         );
-        let query = qp
-            .parse_query(query_str)
-            .with_context(|| format!("parse tantivy query {query_str:?}"))?;
+        let query = match qp.parse_query(query_str) {
+            Ok(q) => {
+                tracing::debug!("bm25: parsed query");
+                q
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "bm25: parse failed; literal-term fallback");
+                self.literal_query(query_str)
+            }
+        };
         let top = searcher
             .search(&query, &TopDocs::with_limit(k))
             .context("tantivy search")?;
@@ -136,5 +147,31 @@ impl Bm25Index {
             out.push((id, score));
         }
         Ok(out)
+    }
+
+    /// Literal bag-of-terms fallback: lowercase whitespace tokens as
+    /// per-field TermQueries in a Should BooleanQuery — no metacharacters,
+    /// so any string retrieves *something* when the parser chokes.
+    fn literal_query(&self, query_str: &str) -> Box<dyn tantivy::query::Query> {
+        use tantivy::query::{BooleanQuery, Occur, TermQuery};
+        use tantivy::schema::IndexRecordOption;
+        use tantivy::Term;
+        let mut clauses: Vec<(Occur, Box<dyn tantivy::query::Query>)> = Vec::new();
+        for tok in query_str.split_whitespace() {
+            let tok = tok.to_lowercase();
+            if tok.is_empty() {
+                continue;
+            }
+            for field in [self.fields.text, self.fields.title, self.fields.question] {
+                clauses.push((
+                    Occur::Should,
+                    Box::new(TermQuery::new(
+                        Term::from_field_text(field, &tok),
+                        IndexRecordOption::WithFreqs,
+                    )),
+                ));
+            }
+        }
+        Box::new(BooleanQuery::new(clauses))
     }
 }
