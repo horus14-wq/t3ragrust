@@ -54,6 +54,17 @@ pub struct IndexArgs {
     /// Vector quantization for the dense index.
     #[arg(long, value_enum, default_value_t = Quantization::I8)]
     pub quantization: Quantization,
+    /// ONNX execution provider. `auto` tries every compiled-in EP and
+    /// silently falls back to CPU. Non-cpu choices require the matching
+    /// cargo feature (ep-cuda / ep-openvino / ep-webgpu).
+    #[arg(long, value_enum, default_value_t = Ep::Auto)]
+    pub ep: Ep,
+    /// Parallel embedding sessions (each loads its own ~600MB model copy).
+    #[arg(long, default_value_t = 1)]
+    pub pool: usize,
+    /// ORT intra-op threads per session (0 = cores/pool).
+    #[arg(long, default_value_t = 0)]
+    pub threads: usize,
 }
 
 #[derive(Args)]
@@ -96,6 +107,16 @@ pub struct SearchArgs {
     /// Exact brute-force scan instead of ANN (recall reference).
     #[arg(long)]
     pub exact: bool,
+    /// ONNX execution provider (see `t3rag index --ep`).
+    #[arg(long, value_enum, default_value_t = Ep::Auto)]
+    pub ep: Ep,
+    /// Parallel embedding sessions (query path only uses one; >1 is for
+    /// concurrent workloads).
+    #[arg(long, default_value_t = 1)]
+    pub pool: usize,
+    /// ORT intra-op threads per session (0 = cores/pool).
+    #[arg(long, default_value_t = 0)]
+    pub threads: usize,
 }
 
 #[derive(Args)]
@@ -133,4 +154,18 @@ pub enum Quantization {
     I8,
     Bf16,
     Fp32,
+}
+
+/// ONNX Runtime execution-provider selection (runtime flag; availability
+/// is gated by the ep-* cargo feature the binary was built with).
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum Ep {
+    /// Try every compiled-in EP (non-fatal failures), fall back to CPU.
+    Auto,
+    /// Force CPU only.
+    Cpu,
+    Cuda,
+    Tensorrt,
+    Openvino,
+    Webgpu,
 }

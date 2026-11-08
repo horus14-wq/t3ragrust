@@ -10,9 +10,11 @@
 //! cache is shared across machines/users and dedupes the ~1-2GB weights.
 
 mod model;
+mod pool;
 mod session;
 
 pub use model::ModelSpec;
+pub use pool::EmbedderPool;
 pub use session::Embedder;
 
 /// Instruction prefix applied to *queries only* (Qwen3-Embedding convention;

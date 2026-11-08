@@ -1,14 +1,97 @@
 //! ONNX embedding session: tokenize -> forward -> last-token pooling -> L2.
 
 use std::path::PathBuf;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{bail, Context, Result};
+use ort::ep::ExecutionProviderDispatch;
 use ort::session::{builder::GraphOptimizationLevel, Session, SessionInputValue};
 use ort::value::{Tensor, TensorElementType, ValueType};
 use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 use tracing::{info, warn};
 
 use super::{ModelSpec, MAX_EMBED_TOKENS};
+use crate::cli::Ep;
+
+/// Map the `--ep` choice to a list of execution providers. `auto` registers
+/// every compiled-in EP with `error_on_failure(false)` so missing hardware
+/// just skips to CPU; explicit choices fail loudly when unavailable.
+fn providers_for(ep: Ep) -> Result<Vec<ExecutionProviderDispatch>> {
+    fn not_built(name: &str) -> anyhow::Error {
+        anyhow::anyhow!(
+            "EP '{name}' not compiled into this binary — rebuild with the matching cargo feature: --features ep-{name}"
+        )
+    }
+    // Mutability is only exercised when an ep-* feature is compiled in.
+    #[allow(unused_mut)]
+    let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
+    #[allow(unused_mut)]
+    let mut push_all = |#[allow(unused_variables)] strict: bool| {
+        #[cfg(feature = "ep-cuda")]
+        {
+            eps.push(ort::ep::CUDA::default().build().error_on_failure(strict));
+            eps.push(
+                ort::ep::TensorRT::default()
+                    .build()
+                    .error_on_failure(strict),
+            );
+        }
+        #[cfg(feature = "ep-openvino")]
+        eps.push(
+            ort::ep::OpenVINO::default()
+                .build()
+                .error_on_failure(strict),
+        );
+        #[cfg(feature = "ep-webgpu")]
+        eps.push(ort::ep::WebGPU::default().build().error_on_failure(strict));
+    };
+    match ep {
+        Ep::Auto => push_all(false),
+        Ep::Cpu => {}
+        Ep::Cuda => {
+            #[cfg(feature = "ep-cuda")]
+            eps.push(ort::ep::CUDA::default().build().error_on_failure(true));
+            #[cfg(not(feature = "ep-cuda"))]
+            return Err(not_built("cuda"));
+        }
+        Ep::Tensorrt => {
+            #[cfg(feature = "ep-cuda")]
+            eps.push(ort::ep::TensorRT::default().build().error_on_failure(true));
+            #[cfg(not(feature = "ep-cuda"))]
+            return Err(not_built("cuda"));
+        }
+        Ep::Openvino => {
+            #[cfg(feature = "ep-openvino")]
+            eps.push(ort::ep::OpenVINO::default().build().error_on_failure(true));
+            #[cfg(not(feature = "ep-openvino"))]
+            return Err(not_built("openvino"));
+        }
+        Ep::Webgpu => {
+            #[cfg(feature = "ep-webgpu")]
+            eps.push(ort::ep::WebGPU::default().build().error_on_failure(true));
+            #[cfg(not(feature = "ep-webgpu"))]
+            return Err(not_built("webgpu"));
+        }
+    }
+    Ok(eps)
+}
+
+/// ORT allows exactly one `Environment` per process — share it across pool
+/// sessions via a lazily-initialized singleton.
+fn ort_env() -> Result<Arc<ort::environment::Environment>> {
+    static ENV: OnceLock<Arc<ort::environment::Environment>> = OnceLock::new();
+    if let Some(e) = ENV.get() {
+        return Ok(e.clone());
+    }
+    let env = Arc::new(
+        ort::init()
+            .with_name("t3rag")
+            .build()
+            .context("init ort environment")?,
+    );
+    let _ = ENV.set(env.clone()); // benign race: first writer wins
+    Ok(env)
+}
 
 /// Qwen3 pad token id ("endoftext"), used for right-padding batches.
 const PAD_ID: u32 = 151643;
@@ -28,20 +111,20 @@ pub struct Embedder {
 
 impl Embedder {
     /// Download (or reuse HF cache) and load the model.
-    pub fn load(spec: &ModelSpec, intra_threads: usize) -> Result<Self> {
+    pub fn load(spec: &ModelSpec, intra_threads: usize, ep: Ep) -> Result<Self> {
         let (onnx_path, tokenizer_path) = fetch_files(spec)?;
-        let env = ort::init()
-            .with_name("t3rag")
-            .build()
-            .context("init ort environment")?;
+        let eps = providers_for(ep)?;
+        let env = ort_env()?;
         // ort builder errors aren't Send+Sync — render via Debug, not `?`.
         let berr = |e: ort::Error| anyhow::anyhow!("session builder: {e:?}");
-        let builder = Session::builder(&env).map_err(berr)?;
+        let builder = Session::builder(env.as_ref()).map_err(berr)?;
         let mut builder = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow::anyhow!("optimization level: {e:?}"))?
             .with_intra_threads(intra_threads.max(1))
-            .map_err(|e| anyhow::anyhow!("intra threads: {e:?}"))?;
+            .map_err(|e| anyhow::anyhow!("intra threads: {e:?}"))?
+            .with_execution_providers(&eps)
+            .map_err(|e| anyhow::anyhow!("execution providers: {e:?}"))?;
         let session = builder
             .commit_from_file(&onnx_path)
             .with_context(|| format!("load ONNX model {}", onnx_path.display()))?;
@@ -65,7 +148,10 @@ impl Embedder {
             })
             .collect();
         if !kv_inputs.is_empty() {
-            info!(count = kv_inputs.len(), "merged KV export; feeding empty past_key_values");
+            info!(
+                count = kv_inputs.len(),
+                "merged KV export; feeding empty past_key_values"
+            );
         }
 
         let mut tokenizer = Tokenizer::from_file(&tokenizer_path)

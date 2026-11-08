@@ -12,7 +12,7 @@ use serde::Serialize;
 use tracing::warn;
 
 use crate::cli::SearchArgs;
-use crate::embed::{self, Embedder};
+use crate::embed::{self, EmbedderPool};
 use crate::index::{Bm25Index, DenseIndex};
 use crate::paths;
 use crate::store::{self, PassageReader};
@@ -51,7 +51,7 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
         Some(m) => embed::resolve_model(Some(m)),
         None => embed::ModelSpec::for_hf_repo(&meta.model),
     };
-    let mut emb = Embedder::load(&spec, 4)?;
+    let emb = EmbedderPool::load(&spec, args.threads, args.ep, args.pool)?;
     let quant = parse_quant(&meta.quantization)?;
     let dense = DenseIndex::view(&corpus, meta.dims as usize, quant)?;
     let lex = Bm25Index::open(&corpus)?;

@@ -10,7 +10,7 @@ use anyhow::{bail, Context, Result};
 use tracing::info;
 
 use crate::cli::IndexArgs;
-use crate::embed::{self, Embedder};
+use crate::embed::{self, EmbedderPool};
 use crate::ingest;
 use crate::paths;
 use crate::store::{self, CorpusMeta, PassageWriter};
@@ -24,8 +24,6 @@ const EMBED_BATCH: usize = 16;
 /// batch x seq^2 attention mask — unbounded batches exceed ORT's 4GB
 /// tensor limit when a long passage is present.
 const EMBED_TOKEN_BUDGET: usize = 4096;
-/// ORT intra-op threads per session.
-const EMBED_THREADS: usize = 8;
 
 /// `t3rag index` — ingest -> pack -> embed -> usearch+tantivy -> meta.json.
 ///
@@ -38,7 +36,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
 
     let spec = embed::resolve_model(args.model.as_deref());
     info!(model = %spec.repo_id, "loading embedder (first run downloads ~1-2GB)");
-    let mut emb = Embedder::load(&spec, EMBED_THREADS)?;
+    let emb = EmbedderPool::load(&spec, args.threads, args.ep, args.pool)?;
     info!(dims = emb.dims(), "embedder ready");
 
     let dir = paths::corpus_dir(&args.name)?;
@@ -66,7 +64,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         if !batch.is_empty()
             && (batch.len() == EMBED_BATCH || batch_tokens + est > EMBED_TOKEN_BUDGET)
         {
-            flush_batch(&mut emb, &mut dense, &mut batch)?;
+            flush_batch(&emb, &mut dense, &mut batch)?;
             batch_tokens = 0;
             if next_id % 1024 < EMBED_BATCH as u64 {
                 info!(docs = next_id, stats = %stats, "indexing");
@@ -75,7 +73,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         batch_tokens += est;
         batch.push((p.id, p.text));
     }
-    flush_batch(&mut emb, &mut dense, &mut batch)?;
+    flush_batch(&emb, &mut dense, &mut batch)?;
 
     let n = writer.finish()?;
     let nd = dense.finish()?;
@@ -119,7 +117,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
 }
 
 fn flush_batch(
-    emb: &mut Embedder,
+    emb: &EmbedderPool,
     dense: &mut DenseBuilder,
     batch: &mut Vec<(u64, String)>,
 ) -> Result<()> {

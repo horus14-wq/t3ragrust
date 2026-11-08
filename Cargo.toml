@@ -26,6 +26,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 postcard = { version = "1", features = ["alloc"] }
 
+# Execution-provider build variants. ort-sys ships ONE binary flavor per
+# build — enable at most one ep-* feature at a time (e.g.
+# `cargo build --features ep-cuda`). With none enabled you get the CPU
+# binary; all `--ep` values other than cpu then error at registration time.
+[features]
+default = []
+ep-cuda = ["ort/cuda", "ort/tensorrt"]
+ep-openvino = ["ort/openvino"]
+ep-webgpu = ["ort/webgpu"]
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
