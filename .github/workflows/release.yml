@@ -73,13 +73,16 @@ jobs:
           set -euo pipefail
           v=${GITHUB_REF_NAME}
           name="t3rag-${v}-${{ matrix.flavor }}-${{ matrix.target }}"
+          # Stage payload outside dist/ — the release job publishes
+          # dist/**/* recursively and would leak the bare binary under a
+          # flavor-blind basename (last writer wins across matrix legs).
           if [ "${{ runner.os }}" = "Windows" ]; then
-            mkdir -p "dist/$name" && cp target/release/t3rag.exe "dist/$name/"
-            7z a "dist/$name.zip" "dist/$name"
+            mkdir -p "pkg/$name" && cp target/release/t3rag.exe "pkg/$name/"
+            7z a "dist/$name.zip" "pkg/$name"
             (cd dist && certutil -hashfile "$name.zip" SHA256 | tail -1 > "$name.zip.sha256")
           else
-            mkdir -p "dist/$name" && cp target/release/t3rag "dist/$name/"
-            tar -czf "dist/$name.tar.gz" -C dist "$name"
+            mkdir -p "pkg/$name" && cp target/release/t3rag "pkg/$name/"
+            tar -czf "dist/$name.tar.gz" -C pkg "$name"
             # sha256sum = GNU coreutils (all Linux runners); shasum = perl
             # (macOS). The ARM image lacks shasum — probe instead of assuming.
             (cd dist && (command -v sha256sum >/dev/null \
