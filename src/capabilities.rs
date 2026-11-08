@@ -155,6 +155,104 @@ pub fn run_man(dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// `t3rag publish` — upload a corpus dir to a HF dataset repo via the
+/// `hf` CLI (t3-css.3.9). A README.md repo card is generated alongside
+/// carrying model/dims/quant/provenance so `pull` consumers can check
+/// compatibility. The corpus dir is self-contained (meta.json +
+/// passages + vectors + bm25); tantivy/usearch index internals are NOT
+/// covered by format_version — the card records the producing t3rag
+/// version.
+///
+/// # Errors
+/// The corpus isn't indexed, `hf` is missing, or the upload fails.
+pub fn run_publish(args: crate::cli::PublishArgs) -> Result<()> {
+    let root = paths::corpora_root()?;
+    let name = args.corpus.unwrap_or(crate::serve::newest_corpus(&root)?);
+    let dir = root.join(&name);
+    let meta =
+        crate::store::read_meta(&dir).with_context(|| format!("corpus '{name}' not indexed"))?;
+    let card = format!(
+        "---\ntags: [t3rag]\n---\n\
+         # t3rag corpus `{name}`\n\n\
+         Pre-built retrieval index. Install with `t3rag pull --repo {}`.\n\n\
+         - t3rag: {}\n- model: {}\n- dims: {}\n- quantization: {}\n\
+         - docs: {}\n- origin: {}\n",
+        args.repo,
+        env!("CARGO_PKG_VERSION"),
+        meta.model,
+        meta.dims,
+        meta.quantization,
+        meta.doc_count,
+        meta.origin.as_deref().unwrap_or("unknown"),
+    );
+    let tmp = std::env::temp_dir().join(format!("t3rag-card-{name}.md"));
+    std::fs::write(&tmp, card)?;
+    let run = |a: &[&str]| -> Result<()> {
+        let st = std::process::Command::new("hf")
+            .args(a)
+            .status()
+            .context("run `hf` — is the Hugging Face CLI installed?")?;
+        if !st.success() {
+            anyhow::bail!("hf {:?} exited {}", a, st);
+        }
+        Ok(())
+    };
+    run(&[
+        "upload",
+        &args.repo,
+        &dir.to_string_lossy(),
+        "--repo-type",
+        &args.repo_type,
+    ])?;
+    run(&[
+        "upload",
+        &args.repo,
+        &tmp.to_string_lossy(),
+        "README.md",
+        "--repo-type",
+        &args.repo_type,
+    ])?;
+    println!("published '{name}' -> {} ({})", dir.display(), args.repo);
+    Ok(())
+}
+
+/// `t3rag pull` — download a published corpus into the corpora root so
+/// `search`/`serve`/`mcp` use it unchanged. Refuses to overwrite an
+/// existing corpus dir.
+///
+/// # Errors
+/// The target exists, `hf` fails, or the download lacks `meta.json`.
+pub fn run_pull(args: crate::cli::PullArgs) -> Result<()> {
+    let root = paths::corpora_root()?;
+    let name = args
+        .name
+        .clone()
+        .or_else(|| args.repo.rsplit('/').next().map(String::from))
+        .context("--name required when repo has no name component")?;
+    let dir = root.join(&name);
+    if dir.exists() {
+        anyhow::bail!("corpus '{name}' already exists at {}", dir.display());
+    }
+    let st = std::process::Command::new("hf")
+        .args([
+            "download",
+            &args.repo,
+            "--repo-type",
+            &args.repo_type,
+            "--local-dir",
+            &dir.to_string_lossy(),
+        ])
+        .status()
+        .context("run `hf` — is the Hugging Face CLI installed?")?;
+    if !st.success() {
+        anyhow::bail!("hf download exited {st}");
+    }
+    crate::store::read_meta(&dir)
+        .with_context(|| format!("{} has no valid meta.json — not a t3rag corpus?", args.repo))?;
+    println!("pulled '{}' -> {}", name, dir.display());
+    Ok(())
+}
+
 /// `t3rag selftest` — alias-level sanity (same as `health`, plus a clap
 /// parse of the full arg surface so the help tree itself is proven).
 pub fn run_selftest() -> Result<()> {

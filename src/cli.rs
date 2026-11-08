@@ -49,6 +49,8 @@ impl Cli {
             Command::Capabilities => crate::capabilities::run_capabilities(),
             Command::Models => crate::capabilities::run_models(),
             Command::Export(args) => crate::capabilities::run_export(args),
+            Command::Publish(args) => crate::capabilities::run_publish(args),
+            Command::Pull(args) => crate::capabilities::run_pull(args),
             Command::Completions { shell } => crate::capabilities::run_completions(shell),
             Command::Man { dir } => crate::capabilities::run_man(&dir),
             Command::Selftest => crate::capabilities::run_selftest(),
