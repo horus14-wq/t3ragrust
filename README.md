@@ -25,6 +25,17 @@ t3rag index --input traces.jsonl --name traces
 t3rag pull --repo horus14-wq/fable5-v2-coding-t3-indexes --subdir struct
 #   (subdirs: struct | semantic | reflect | raw-chunked — 52K+ coding
 #    reasoning traces each, ready to query)
+```
+
+### Corpora on Hugging Face
+
+- [`fable5-v2-coding-t3-indexes`](https://huggingface.co/datasets/horus14-wq/fable5-v2-coding-t3-indexes)
+  — prebuilt t3rag indexes for `t3rag pull` (four subdirs, ~2.5 GB total)
+- [`fable5-v2-coding-t3`](https://huggingface.co/datasets/horus14-wq/fable5-v2-coding-t3)
+  — the source JSONLs they were built from (raw dedup'd traces + the
+  struct/reflect/semantic T3 transforms, for indexing your own)
+
+```bash
 
 # Query it (daemon auto-spawns on first call)
 t3rag search "PowerShell ValidateSet splatting"
