@@ -119,6 +119,15 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
 /// Thin client: POST the query to the resident daemon (t3-wkp.13).
 fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
     let (model, rerank, candidates) = resolve_preset(args);
+    let preset = if args.fast {
+        Some("fast")
+    } else if args.max {
+        Some("max")
+    } else if args.balanced {
+        Some("balanced")
+    } else {
+        None
+    };
     let resp = ureq::post(&format!("{base}/search"))
         .send_json(serde_json::json!({
             "query": args.query,
@@ -127,6 +136,8 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "candidates": candidates,
             "rerank": rerank,
             "model": model,
+            "exact": args.exact,
+            "preset": preset,
         }))
         .context("daemon POST /search")?;
     if resp.status() != 200 {

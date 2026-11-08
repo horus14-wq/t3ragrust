@@ -174,14 +174,33 @@ impl DenseIndex {
         if dims != self.dims {
             bail!("raw blob dims {dims} != index dims {}", self.dims);
         }
-        let stride = 8 + dims * 4; // id + vector per record
+        // Record layout differs by format version: v1 wrote bare f32 rows
+        // (id == row index); v2 writes [u64 id][f32 vec] (chunked corpora
+        // store non-embedded parents). The blob has no version field, but
+        // the two sizes can never coincide (they differ by 8·n bytes).
+        let v2_stride = 8 + dims * 4;
+        let v1_stride = dims * 4;
+        let (stride, has_id) = if buf.len() == 16 + n * v2_stride {
+            (v2_stride, true)
+        } else if buf.len() == 16 + n * v1_stride {
+            (v1_stride, false)
+        } else {
+            bail!(
+                "corrupt {}: size {} fits neither v1 ({}) nor v2 ({}) records",
+                RAW_FILE,
+                buf.len(),
+                16 + n * v1_stride,
+                16 + n * v2_stride
+            );
+        };
         let mut scored: Vec<(u64, f32)> = Vec::with_capacity(n);
         for i in 0..n {
-            let rec = buf
-                .get(16 + i * stride..16 + (i + 1) * stride)
-                .with_context(|| format!("raw blob truncated at row {i}"))?;
-            let id = u64::from_le_bytes(rec[0..8].try_into().unwrap());
-            let row = &rec[8..];
+            let rec = &buf[16 + i * stride..16 + (i + 1) * stride];
+            let (id, row) = if has_id {
+                (u64::from_le_bytes(rec[0..8].try_into().unwrap()), &rec[8..])
+            } else {
+                (i as u64, rec)
+            };
             let mut dot = 0f32;
             for (j, &q) in query.iter().enumerate() {
                 dot += q * f32::from_le_bytes(row[j * 4..j * 4 + 4].try_into().unwrap());

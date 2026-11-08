@@ -32,7 +32,11 @@ fn tools_list() -> Value {
                     "query": {"type": "string", "description": "the problem/question to find traces for"},
                     "top_k": {"type": "integer", "default": 3, "description": "passages to return"},
                     "corpus": {"type": "string", "description": "corpus name (e.g. reflect/construct/semantic); default = newest"},
-                    "rerank": {"type": "boolean", "default": true, "description": "cross-encoder rerank of fused candidates"}
+                    "candidates": {"type": "integer", "default": 50, "description": "fused candidates before top_k/rerank"},
+                    "rerank": {"type": "boolean", "default": true, "description": "cross-encoder rerank of fused candidates"},
+                    "exact": {"type": "boolean", "default": false, "description": "brute-force exact scan instead of ANN"},
+                    "preset": {"type": "string", "enum": ["fast", "balanced", "max"], "description": "quality preset (sets candidates/rerank defaults)"},
+                    "model": {"type": "string", "description": "embedding model repo override (must match the daemon's)"}
                 },
                 "required": ["query"]
             }

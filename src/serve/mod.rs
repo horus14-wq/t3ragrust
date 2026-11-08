@@ -102,6 +102,8 @@ struct SearchRequest {
     candidates: Option<usize>,
     rerank: Option<bool>,
     model: Option<String>,
+    exact: Option<bool>,
+    preset: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -337,8 +339,16 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     }
     let (name, corpus) = st.corpus(req.corpus.as_deref())?;
     tracing::debug!(corpus = %name, "stage: corpus ready");
+    // Preset resolves to candidate/rerank defaults before explicit fields
+    // (parity with the cold path's --fast/--balanced/--max).
+    let (pc, pr) = match req.preset.as_deref() {
+        Some("fast") => (20, false),
+        Some("max") => (100, true),
+        _ => (50, true),
+    };
     let top_k = req.top_k.unwrap_or(3);
-    let cand = req.candidates.unwrap_or(50);
+    let cand = req.candidates.unwrap_or(pc);
+    let want_rerank = req.rerank.unwrap_or(pr);
 
     let cached = st.query_cache.lock().unwrap().get(&req.query);
     let qvec = match cached {
@@ -356,12 +366,18 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         }
     };
     tracing::debug!("stage: embed done");
-    let ann = corpus.dense.search(&qvec, cand)?;
+    // --exact: brute-force scan over raw vectors (the recall oracle) instead
+    // of the ANN — forwarded through the daemon since t3-css.1.4.
+    let ann = if req.exact == Some(true) {
+        corpus.dense.exact_search(&qvec, cand)?
+    } else {
+        corpus.dense.search(&qvec, cand)?
+    };
     let bm = corpus.lex.search(&req.query, cand).unwrap_or_default();
     let mut ranked = rrf_fuse(&[ann, bm]);
     tracing::debug!("stage: fused");
 
-    if req.rerank.unwrap_or(true) {
+    if want_rerank {
         let cand_rows: Vec<(u64, f32)> = ranked.drain(..).take(cand).collect();
         let mut pairs = Vec::with_capacity(cand_rows.len());
         let mut ids = Vec::with_capacity(cand_rows.len());
@@ -436,6 +452,8 @@ async fn mcp_http(
                 candidates: args["candidates"].as_u64().map(|v| v as usize),
                 rerank: args["rerank"].as_bool(),
                 model: args["model"].as_str().map(String::from),
+                exact: args["exact"].as_bool(),
+                preset: args["preset"].as_str().map(String::from),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))
