@@ -17,8 +17,12 @@ jobs:
         # ubuntu-24.04-arm = GitHub ARM64 runner (billed minutes on private
         # repos). macos-15-intel intentionally absent: ONNX Runtime >=1.24
         # ships no x86_64-darwin binaries and ort-sys has no prebuilt dist —
-        # Intel Macs can't link the embedder (t3-7hc).
-        os: [ubuntu-latest, windows-latest, macos-14, ubuntu-24.04-arm]
+        # Intel Macs can't link the embedder (t3-7hc). macos-14 removed:
+        # this private repo has no macOS hosted-runner entitlement — GitHub
+        # rejects the leg at queue time ("configuration
+        # 'macos-14-arm64-us-default' is not supported"). Restore if the
+        # repo goes public or billing enables macOS.
+        os: [ubuntu-latest, windows-latest, ubuntu-24.04-arm]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
