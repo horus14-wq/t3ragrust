@@ -1016,6 +1016,36 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             "expanded_from: PRF seeded by passages {expanded_from:?}"
         ));
     }
+    // t3-c3j: leg-agreement + rank-gap honesty hints. These are real
+    // computed signals, NOT calibrated confidence bands — RRF/rerank
+    // scores aren't calibrated scales, so a scalar `confidence` would
+    // be fabricated precision. Bands land once eval --history has
+    // enough labeled data to calibrate thresholds per corpus.
+    // Skipped for --like (dense-only by design — no BM25 leg ran).
+    if like_seed.is_none() && !results.is_empty() {
+        let top = &results[0];
+        if top.dense_score.is_some() != top.bm25_score.is_some() {
+            warnings.push("leg_disagreement: top hit surfaced by only one retrieval leg".into());
+        }
+        if results.len() > 1 {
+            let (s1, s2) = (results[0].score, results[1].score);
+            if s1 > 0.0 && (s1 - s2).abs() / s1 < 0.10 {
+                warnings.push(format!(
+                    "narrow_rank_gap: top-2 scores within 10% ({s1:.4} vs {s2:.4})"
+                ));
+            }
+        }
+        let both = results
+            .iter()
+            .filter(|h| h.dense_score.is_some() && h.bm25_score.is_some())
+            .count();
+        if results.len() > 1 && both * 2 < results.len() {
+            warnings.push(format!(
+                "weak_leg_agreement: {both}/{} top hits appear in both dense+BM25 legs",
+                results.len()
+            ));
+        }
+    }
     let now_s = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
