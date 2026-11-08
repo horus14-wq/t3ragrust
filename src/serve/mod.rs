@@ -158,6 +158,8 @@ struct SearchRequest {
     /// t3-4vh: pseudo-relevance feedback — blend top-3 hit vectors into
     /// the query and re-run the dense leg (the no-LLM recall lever).
     expand: Option<bool>,
+    /// t3-6vv: cap total returned passage text at ~N tokens (chars/4).
+    token_budget: Option<usize>,
 }
 
 #[derive(Serialize, Clone)]
@@ -874,6 +876,8 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
     let mut text_truncated = false;
+    let mut budget_used = 0usize;
+    let mut budget_exhausted = false;
     for (ci, id, score) in ranked.into_iter().skip(req.offset.unwrap_or(0)) {
         if let Some(ms) = req.min_score {
             if score < ms {
@@ -930,6 +934,15 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             }
             _ => parent.text,
         };
+        // --token-budget (t3-6vv): fill in rank order until ~N tokens of
+        // text are returned; the remainder reports as truncated.
+        if let Some(tb) = req.token_budget {
+            budget_used += text.len() / 4;
+            if budget_used > tb {
+                budget_exhausted = true;
+                break;
+            }
+        }
         results.push(HitOut {
             rank: results.len() + 1,
             passage_id: parent.id,
@@ -989,6 +1002,12 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     }
     if text_truncated {
         warnings.push("passage_text_truncated: --max-chars applied".into());
+    }
+    if budget_exhausted {
+        warnings.push(format!(
+            "token_budget_exhausted: stopped after ~{} tokens of passage text",
+            budget_used
+        ));
     }
     if !expanded_from.is_empty() {
         warnings.push(format!(
@@ -1188,6 +1207,7 @@ async fn mcp_http(
                 like_text: args["like_text"].as_str().map(String::from),
                 group_by: args["group_by"].as_str().map(String::from),
                 expand: args["expand"].as_bool(),
+                token_budget: args["token_budget"].as_u64().map(|v| v as usize),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))

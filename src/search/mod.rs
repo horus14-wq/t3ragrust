@@ -217,6 +217,7 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "like_text": args.like_text,
             "group_by": args.group_by,
             "expand": args.expand,
+            "token_budget": args.token_budget,
             "sparse": args.sparse,
             "queries": args.also,
         }))
@@ -446,6 +447,7 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     // --exclude (t3-b68): same parent-id subtraction as the daemon path.
     let exclude: FxHashSet<u64> = args.exclude.iter().copied().collect();
     let mut hits = Vec::new();
+    let mut budget_used = 0usize;
     let mut seen_parents = FxHashSet::default();
     for (id, score) in ranked {
         let p = reader.get(id)?;
@@ -459,6 +461,14 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
         }
         if args.like.is_some_and(|s| s == parent.id) {
             continue;
+        }
+        // --token-budget (t3-6vv): fill in rank order until ~N tokens.
+        if let Some(tb) = args.token_budget {
+            budget_used += parent.text.len() / 4;
+            if budget_used > tb {
+                eprintln!("token_budget_exhausted: stopped after ~{budget_used} tokens");
+                break;
+            }
         }
         if !seen_parents.insert(parent.id) {
             continue;

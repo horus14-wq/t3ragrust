@@ -57,6 +57,7 @@ fn tools_list() -> Value {
                     "exclude": {"type": "array", "items": {"type": "integer"}, "description": "passage ids to exclude from results (iterative refinement)"},
                     "group_by": {"type": "string", "enum": ["question", "source", "corpus"], "description": "group hits into buckets by field"},
                     "expand": {"type": "boolean", "default": false, "description": "pseudo-relevance feedback — blend top hits into the query"},
+                    "token_budget": {"type": "integer", "description": "cap total passage text at ~N tokens (chars/4)"},
                     "rerank_candidates": {"type": "integer", "description": "candidates fed to reranker"},
                     "preset": {"type": "string", "enum": ["fast", "balanced", "max"], "description": "quality preset (sets candidates/rerank defaults)"},
                     "model": {"type": "string", "description": "embedding model repo override (must match the daemon's)"}

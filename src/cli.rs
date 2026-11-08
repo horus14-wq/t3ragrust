@@ -253,6 +253,10 @@ pub struct SearchArgs {
     /// and re-run the dense leg (t3-4vh; daemon path).
     #[arg(long)]
     pub expand: bool,
+    /// Stop filling results once passage text exceeds N tokens
+    /// (chars/4 heuristic) — keeps injected context inside the window.
+    #[arg(long)]
+    pub token_budget: Option<usize>,
     /// Enable the cross-encoder reranker (default).
     #[arg(long, overrides_with = "no_rerank")]
     pub rerank: bool,
