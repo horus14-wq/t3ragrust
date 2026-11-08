@@ -25,54 +25,54 @@ pub(crate) fn providers_for(ep: Ep) -> Result<Vec<ExecutionProviderDispatch>> {
     // Mutability is only exercised when an ep-* feature is compiled in.
     #[allow(unused_mut)]
     let mut eps: Vec<ExecutionProviderDispatch> = Vec::new();
+    // ort rc.15: error_on_failure is 0-arity (t3-x9y ep-* builds).
+    fn maybe_strict(d: ExecutionProviderDispatch, strict: bool) -> ExecutionProviderDispatch {
+        if strict {
+            d.error_on_failure()
+        } else {
+            d
+        }
+    }
     #[allow(unused_mut)]
     let mut push_all = |#[allow(unused_variables)] strict: bool| {
         #[cfg(feature = "ep-cuda")]
         {
-            eps.push(ort::ep::CUDA::default().build().error_on_failure(strict));
-            eps.push(
-                ort::ep::TensorRT::default()
-                    .build()
-                    .error_on_failure(strict),
-            );
+            eps.push(maybe_strict(ort::ep::CUDA::default().build(), strict));
+            eps.push(maybe_strict(ort::ep::TensorRT::default().build(), strict));
         }
         #[cfg(feature = "ep-openvino")]
-        eps.push(
-            ort::ep::OpenVINO::default()
-                .build()
-                .error_on_failure(strict),
-        );
+        eps.push(maybe_strict(ort::ep::OpenVINO::default().build(), strict));
         // DirectML's builder has no error_on_failure(strict) variant —
         // registration failures are always non-fatal (falls back to CPU).
         #[cfg(feature = "ep-directml")]
         eps.push(ort::ep::DirectML::default().build().error_on_failure());
         #[cfg(feature = "ep-webgpu")]
-        eps.push(ort::ep::WebGPU::default().build().error_on_failure(strict));
+        eps.push(maybe_strict(ort::ep::WebGPU::default().build(), strict));
     };
     match ep {
         Ep::Auto => push_all(false),
         Ep::Cpu => {}
         Ep::Cuda => {
             #[cfg(feature = "ep-cuda")]
-            eps.push(ort::ep::CUDA::default().build().error_on_failure(true));
+            eps.push(ort::ep::CUDA::default().build().error_on_failure());
             #[cfg(not(feature = "ep-cuda"))]
             return Err(not_built("cuda"));
         }
         Ep::Tensorrt => {
             #[cfg(feature = "ep-cuda")]
-            eps.push(ort::ep::TensorRT::default().build().error_on_failure(true));
+            eps.push(ort::ep::TensorRT::default().build().error_on_failure());
             #[cfg(not(feature = "ep-cuda"))]
             return Err(not_built("cuda"));
         }
         Ep::Openvino => {
             #[cfg(feature = "ep-openvino")]
-            eps.push(ort::ep::OpenVINO::default().build().error_on_failure(true));
+            eps.push(ort::ep::OpenVINO::default().build().error_on_failure());
             #[cfg(not(feature = "ep-openvino"))]
             return Err(not_built("openvino"));
         }
         Ep::Coreml => {
             #[cfg(feature = "ep-coreml")]
-            eps.push(ort::ep::CoreML::default().build().error_on_failure(true));
+            eps.push(ort::ep::CoreML::default().build().error_on_failure());
             #[cfg(not(feature = "ep-coreml"))]
             return Err(not_built("coreml"));
         }
@@ -85,7 +85,7 @@ pub(crate) fn providers_for(ep: Ep) -> Result<Vec<ExecutionProviderDispatch>> {
         }
         Ep::Webgpu => {
             #[cfg(feature = "ep-webgpu")]
-            eps.push(ort::ep::WebGPU::default().build().error_on_failure(true));
+            eps.push(ort::ep::WebGPU::default().build().error_on_failure());
             #[cfg(not(feature = "ep-webgpu"))]
             return Err(not_built("webgpu"));
         }
