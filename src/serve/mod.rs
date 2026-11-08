@@ -471,9 +471,16 @@ async fn list_corpora(State(st): State<Arc<DaemonState>>) -> impl IntoResponse {
     }
     names.sort();
     for n in names {
+        // doc_count from meta.json on disk — unloaded corpora aren't
+        // zero-doc, they just aren't mapped yet (t3-ixu fix).
         let (loaded, docs) = match st.corpora.read().unwrap().get(&n) {
             Some(c) => (true, c.meta.doc_count),
-            None => (false, 0),
+            None => (
+                false,
+                store::read_meta(&st.corpora_root.join(&n))
+                    .map(|m| m.doc_count)
+                    .unwrap_or(0),
+            ),
         };
         out.push(serde_json::json!({"name": n, "loaded": loaded, "doc_count": docs}));
     }

@@ -284,12 +284,36 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
             }));
         }
         // list_corpora / suggest (t3-ixu): proxy the daemon's GETs.
+        // Render as a table — NOT tool_response, which formats hit-shaped
+        // results and would mangle corpus rows into fake passages.
         if name == "list_corpora" {
             let mut resp = ureq::get(&format!("{base}/corpora"))
                 .call()
                 .context("daemon /corpora")?;
             let v: Value = resp.body_mut().read_json().context("daemon response")?;
-            return Ok(tool_response(&json!({"results": v})));
+            let mut t = String::from("corpus\tdocs\ttransform\ttop_terms\n");
+            for c in v.as_array().iter().flat_map(|a| a.iter()) {
+                t += &format!(
+                    "{}\t{}\t{}\t{}\n",
+                    c["name"].as_str().or(c["corpus"].as_str()).unwrap_or("?"),
+                    c["docs"].as_u64().or(c["doc_count"].as_u64()).unwrap_or(0),
+                    c["manifest"]["transform"]
+                        .as_str()
+                        .or(c["transform"].as_str())
+                        .unwrap_or("unknown"),
+                    c["manifest"]["top_terms"]
+                        .as_array()
+                        .or(c["top_terms"].as_array())
+                        .map(|ts| ts
+                            .iter()
+                            .filter_map(|t| t.as_str())
+                            .take(4)
+                            .collect::<Vec<_>>()
+                            .join(","))
+                        .unwrap_or_default(),
+                );
+            }
+            return Ok(json!({"content": [{"type": "text", "text": t}]}));
         }
         if name == "suggest" {
             let q = a["query"].as_str().unwrap_or("");
@@ -298,9 +322,20 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
                 .call()
                 .context("daemon /suggest")?;
             let v: Value = resp.body_mut().read_json().context("daemon response")?;
-            return Ok(json!({
-                "content": [{"type": "text", "text": serde_json::to_string(&v)?}]
-            }));
+            let mut t = String::from("corpus\ttransform\tdocs\tsimilarity\n");
+            for r in v["corpora"].as_array().iter().flat_map(|a| a.iter()) {
+                t += &format!(
+                    "{}\t{}\t{}\t{}\n",
+                    r["corpus"].as_str().unwrap_or("?"),
+                    r["transform"].as_str().unwrap_or("?"),
+                    r["docs"].as_u64().unwrap_or(0),
+                    r["similarity"]
+                        .as_f64()
+                        .map(|s| format!("{s:.3}"))
+                        .unwrap_or_else(|| "n/a".into()),
+                );
+            }
+            return Ok(json!({"content": [{"type": "text", "text": t}]}));
         }
         // get_passage (t3-vqd): straight GET to the daemon's route —
         // corpus defaults to the daemon's newest when omitted.
