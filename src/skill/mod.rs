@@ -13,7 +13,7 @@ use crate::cli::SkillArgs;
 /// The SKILL.md content: self-contained agent-facing description of t3rag.
 /// Frontmatter satisfies the Agent Skills spec (`name` + `description`
 /// are required — without it spec-compliant loaders ignore the file).
-const SKILL_MD: &str = r##"---
+pub const SKILL_MD: &str = r##"---
 name: t3rag
 description: Retrieve T3 thinking traces — how prior problems were reasoned about — via local hybrid search (dense ANN + BM25 + cross-encoder rerank). Use before tackling non-trivial problems where prior reasoning experience helps.
 ---
@@ -24,31 +24,76 @@ Rust-native RAG over T3 thinking traces. Local ONNX embeddings
 (Qwen3-Embedding-0.6B) + usearch ANN + tantivy BM25 + RRF fusion +
 optional BGE-v2-m3 rerank. No API keys, no Python.
 
-## When to use
+## The loop (do all six steps)
 
-Use t3rag BEFORE solving a non-trivial problem when prior reasoning
-experience might help: similar bugs, algorithm patterns, debugging
-playbooks, structural approaches. Skip it for trivial lookups — it
-returns *how problems were reasoned about*, not factual docs.
+1. **Orient** — `t3rag health` (is anything up?), `t3rag list` (which
+   corpora exist, their transform `type`, staleness `!`),
+   `t3rag suggest "<problem>"` (ranked corpora for THIS query — type +
+   stats lead, centroid similarity is only a hint).
+2. **Formulate** — query the *problem domain*, not the solution. For
+   pitfalls/failures use failure language ("common mistakes",
+   "what goes wrong"); for approach use how-to phrasing; for the core
+   idea use conceptual phrasing. See `references/query-craft.md`.
+3. **Retrieve** — `t3rag search "<query>" --format toon` (one line per
+   hit, agent-token-optimal). Default searches the newest corpus;
+   pass `--corpus <name>` or `--corpus all` once `suggest` tells you
+   which views matter. MCP: `search_traces`.
+4. **Inspect** — `t3rag show <passage_id>` (or MCP `get_passage`)
+   before citing: scores rank within a result set, they do NOT measure
+   absolute relevance. Never threshold a score; read `meta` +
+   `warnings[]` in `--format json` output instead.
+5. **Iterate** — miss or thin results? `--expand` (PRF: blends top hits
+   into the query), `--like <id>` / `--like-text "..."` (more-like-this
+   neighborhood drill-down, dense-only), `--exclude <id,id,...>`
+   (drop seen hits and re-fill), `--group-by question` (collapse
+   struct/reflect/semantic views of the same problem), or a second,
+   sharper query. `t3rag verify --corpus <name>` if results look wrong.
+6. **Hydrate + cite** — cite the passage `source` field (file:line or
+   `…#src_idx=N` back to the raw corpus). Chunked long passages return
+   whole parents already; `--token-budget N` caps injected context.
 
-## Query craft (the highest-leverage skill)
+## Query craft for traces
 
-Prototype lesson that still holds: **mega-queries fail; sharp
-sub-problems retrieve.** Query for ONE failing symptom, API, or
-constraint — "PowerShell ValidateSet + splatting", not "build my whole
-app". On a miss, refine with a second sharper query. Corpora are named
-per transform — `*_raw` (episode bodies), `*_struct` (cheatsheets),
-`*_reflect` (mistakes), `*_semantic` (insights); mid-debug favors raw,
-planning favors struct/semantic, "what goes wrong" favors reflect.
+- Query the PROBLEM, not the answer: "off-by-one in binary search
+  bounds" retrieves better than pasting your candidate fix.
+- Want failure knowledge? Ask for it: "common mistakes in …",
+  "what goes wrong when …" → routes to `*_reflect` corpora.
+- Scores are relative within one result set — a 0.03 here and a 0.03
+  there are unrelated. Judge by rank + reading `show` output, never by
+  absolute thresholds. Check `warnings[]` (`leg_disagreement`,
+  `token_budget_exhausted`, truncation) — they carry the real signal.
+- One sharp query beats one mega-query; refine after a miss.
 
-## MCP tool
+## Worked examples
 
-`search_traces` — params:
-- `query` (string, required): the problem/question to find traces for
-- `top_k` (int, default 3)
-- `corpus` (string, optional): corpus name (e.g. `reflect`, `construct`,
-  `semantic`); default = most recently indexed
-- `rerank` (bool, default true)
+Pitfalls lookup:
+```bash
+t3rag suggest "rust borrow checker lifetime errors"   # → reflect
+t3rag search "common mistakes rust lifetimes borrow checker" \
+    --corpus reflect --format toon --top-k 5
+t3rag show 4217 --corpus reflect                     # read before citing
+```
+
+Neighborhood drill-down after a good hit:
+```bash
+t3rag search "tokio spawn_blocking vs block_in_place" \
+    --corpus semantic --format toon
+t3rag search --like 512 --corpus semantic --format toon   # dense-only neighbors
+```
+
+Dedup across transform views:
+```bash
+t3rag search "CRDT OR-set tombstones" --corpus all \
+    --group-by question --format toon
+```
+
+## MCP tools
+
+`search_traces` (query, corpus, top_k, rerank, like, like_text, exclude,
+group_by, expand, token_budget, format…), `suggest`, `list_corpora`,
+`batch_search` (queries[] → array of result sets), `get_passage`
+(corpus+id → full text, no model needed). MCP also exposes prompts
+(`t3rag-playbook`) and per-corpus resources.
 
 ### Register (daemon HTTP MCP — shared, warm, recommended)
 
@@ -68,14 +113,20 @@ stdio-proxy call).
 The stdio server NEVER loads the model itself — it proxies to the
 daemon, spawning it if absent.
 
-## CLI equivalents
+## CLI quick reference
 
 ```bash
-t3rag index --input corpus.jsonl --name mycorpus   # build a corpus
-t3rag search "query text" --corpus mycorpus        # query (daemon if up)
+t3rag index --input corpus.jsonl --name mycorpus   # build (auto: model+daemon)
+t3rag search "query" --corpus mycorpus --format toon
 t3rag search "query" --no-daemon                   # cold in-process path
 t3rag search "query" --no-rerank                   # fused order, no rerank
 t3rag search "query" --exact                       # brute-force (recall ref)
+t3rag ask "query"                                   # prompt-injection block
+t3rag suggest "query"                               # corpus routing
+t3rag show N [--corpus C]                            # full passage text
+t3rag list / stats / verify / doctor [--deep]       # introspection
+t3rag feedback --ids 1,2 --verdict relevant         # accrete: log verdicts
+t3rag insights                                      # usage aggregates
 ```
 
 Input formats: JSONL (`text`/`output` + optional `question`/`title`/`source`),
@@ -83,10 +134,10 @@ directory of .md/.txt, or .parquet (auto-detects text column, `--text-col`).
 
 ## Output
 
-Top-k passages with fused/rerank scores, hydrated to whole parents
-(chunked long passages collapse back to their source doc). `--json`
-emits `{query, corpus, results:[{rank,passage_id,score,text,title,
-question,source}]}`.
+`--format json` emits `{query, corpus, meta, warnings[], results:[…]}` —
+`meta` carries corpus/version info, `warnings[]` flags truncation,
+leg disagreement, budget exhaustion. Hits hydrate to whole parents
+(chunked long passages collapse back to their source doc).
 "##;
 
 /// `t3rag skill` entry point: print, install, or uninstall the
@@ -108,19 +159,46 @@ pub fn run_skill(args: SkillArgs) -> Result<()> {
     install(&target, args.force)
 }
 
-/// References shipped alongside SKILL.md (t3-css.3.8): the query-craft
-/// lessons from the prototype that make agents retrieve well.
-const QUERY_CRAFT: &str = "# Query craft (prototype lessons)\n\
-- Query for ONE failing symptom/API/constraint — `\"PowerShell ValidateSet + splatting\"`, not `\"build my app\"`. Mega-queries fail; sharp sub-problems retrieve.\n\
-- Mid-project queries (`this error, this API`) outperform greenfield prompts on these corpora.\n\
-- Refine after a miss — a second sharper query beats a bigger first one.\n\
-- Query by intent → corpus: debugging → `*_raw`, planning → `*_struct`/`*_semantic`, `what goes wrong?` → `*_reflect`.\n\
-- When NOT to use: trivial lookups (single fact, single file) — go read the file.\n";
+/// References shipped alongside SKILL.md (t3-css.3.8, expanded t3-w2f):
+/// the query-craft lessons that make agents retrieve well.
+const QUERY_CRAFT: &str = "# Query craft\n\
+- Query the PROBLEM DOMAIN, not the solution — describe the situation,\n\
+  symptom, or constraint; never paste your candidate fix as the query.\n\
+- Failure/pitfall intent → failure language: \"common mistakes in …\",\n\
+  \"what goes wrong when …\", \"why does … fail\". Approach intent → how-to\n\
+  phrasing (\"how to …\", \"steps to …\"). Conceptual intent → the idea\n\
+  itself (\"what is the core of …\"). `t3rag suggest` uses the same signal.\n\
+- Mega-queries fail; sharp sub-problems retrieve. One failing symptom,\n\
+  API, or constraint per query — refine after a miss, don't broaden.\n\
+- Mid-project queries (`this error, this API`) outperform greenfield\n\
+  prompts on these corpora.\n\
+- Scores are RELATIVE within one result set — fused/rerank scores are\n\
+  not calibrated across corpora or queries. Rank + `t3rag show` beat any\n\
+  threshold. `warnings[]` in JSON output carries leg_disagreement,\n\
+  truncation, and budget signals — read them before trusting a hit.\n\
+- Iterate cheaply: `--expand` (PRF) for recall misses, `--like <id>` for\n\
+  neighborhood drill-down, `--exclude <id,...>` to re-fill after reading,\n\
+  `--group-by question` to collapse the three transform views of one\n\
+  problem into a single row.\n\
+- When NOT to use: trivial lookups (single fact, single file) — go read\n\
+  the file.\n";
 
-const CORPORA: &str = "# Corpus naming + diversity\n\
-- Per-transform corpora: `fable5_v2_{raw,struct,reflect,semantic}` — search them together with `--corpus all` or a comma list.\n\
-- ≤1 hit per source (`--max-per-source 1`): keeps one episode from dominating the top-k.\n\
-- Keep `question` fields lean in ingested JSONL — preamble-polluted questions poison their retrieval neighborhood.\n";
+const CORPORA: &str = "# Corpus naming + routing\n\
+- Transform views share the same problem space: `*_struct` = procedural\n\
+  cheatsheets, `*_reflect` = mistakes/critical-checks, `*_semantic` =\n\
+  compressed core insight, `*_raw` = full episode bodies. They are\n\
+  complementary lenses, not competitors — `--corpus all` +\n\
+  `--group-by question` often beats picking one.\n\
+- `t3rag suggest \"<query>\"` ranks corpora before you search; treat its\n\
+  ordering as a prior, not a verdict (centroid similarity separates the\n\
+  T3 views poorly by design).\n\
+- `t3rag list` shows each corpus's transform `type` and flags stale\n\
+  indexes with `!` (source input newer than the index — rebuild before\n\
+  trusting results). `t3rag verify --corpus <name>` checks integrity.\n\
+- ≤1 hit per source (`--max-per-source 1`): keeps one episode from\n\
+  dominating the top-k.\n\
+- Keep `question` fields lean in ingested JSONL — preamble-polluted\n\
+  questions poison their retrieval neighborhood.\n";
 
 fn install(dir: &Path, force: bool) -> Result<()> {
     let skill_dir = dir.join("t3rag");

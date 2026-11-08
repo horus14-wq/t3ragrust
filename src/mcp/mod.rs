@@ -65,6 +65,20 @@ fn tools_list() -> Value {
                 "required": ["query"]
             }
         }, {
+            "name": "list_corpora",
+            "description": "List indexed corpora with manifest info (transform type, docs, top terms) — call first to route a query.",
+            "inputSchema": {"type": "object", "properties": {}}
+        }, {
+            "name": "suggest",
+            "description": "Rank corpora for a query (type+stats lead; similarity is a hint) — call before choosing --corpus.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "the problem/question to route"}
+                },
+                "required": ["query"]
+            }
+        }, {
             "name": "batch_search",
             "description": "Run N independent queries in one call — each gets its own result set (distinct from the 'queries' arg on search_traces, which fuses phrasings into ONE ranking).",
             "inputSchema": {
@@ -99,7 +113,13 @@ fn tools_list() -> Value {
 /// surface, t3-css.3.6).
 /// `exec` receives `(tool_name, arguments)` — one closure branches
 /// across the whole tool surface (t3-vqd: get_passage added).
-pub fn handle_rpc(msg: &Value, exec: &dyn Fn(&str, &Value) -> Result<Value>) -> Option<Value> {
+/// `ctx` supplies the state prompts/resources answer from:
+/// `{corpora: [{name, manifest}], playbook: "<SKILL.md text>"}` (t3-ixu).
+pub fn handle_rpc(
+    msg: &Value,
+    exec: &dyn Fn(&str, &Value) -> Result<Value>,
+    ctx: &Value,
+) -> Option<Value> {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
     let is_notification = msg.get("id").is_none();
@@ -113,8 +133,55 @@ pub fn handle_rpc(msg: &Value, exec: &dyn Fn(&str, &Value) -> Result<Value>) -> 
         "notifications/initialized" | "notifications/cancelled" => return None,
         "ping" => Ok(json!({})),
         "tools/list" => Ok(tools_list()),
+        // t3-ixu: teach the playbook in-band + expose corpus manifests as
+        // resources — an agent can orient without a prior SKILL.md read.
+        "prompts/list" => Ok(json!({
+            "prompts": [{
+                "name": "t3rag-playbook",
+                "description": "How to use t3rag as an agent: orient → retrieve → inspect → iterate → cite"
+            }]
+        })),
+        "prompts/get" => Ok(json!({
+            "messages": [{
+                "role": "user",
+                "content": {
+                    "type": "text",
+                    "text": ctx["playbook"].as_str().unwrap_or("playbook unavailable")
+                }
+            }]
+        })),
+        "resources/list" => Ok(json!({
+            "resources": ctx["corpora"].as_array().map(|cs| cs.iter().map(|c| json!({
+                "uri": format!("t3rag://corpus/{}", c["name"].as_str().unwrap_or("?")),
+                "name": format!("t3rag corpus {}", c["name"].as_str().unwrap_or("?")),
+                "mimeType": "application/json"
+            })).collect::<Vec<_>>()).unwrap_or_default()
+        })),
+        "resources/read" => {
+            let uri = msg
+                .pointer("/params/uri")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let name = uri.strip_prefix("t3rag://corpus/").unwrap_or("");
+            match ctx["corpora"]
+                .as_array()
+                .and_then(|cs| cs.iter().find(|c| c["name"].as_str() == Some(name)))
+            {
+                Some(c) => Ok(json!({
+                    "contents": [{
+                        "uri": uri,
+                        "mimeType": "application/json",
+                        "text": serde_json::to_string_pretty(c).unwrap_or_default()
+                    }]
+                })),
+                None => Err(format!("unknown resource: {uri}")),
+            }
+        }
         "tools/call" => match msg.pointer("/params/name").and_then(Value::as_str) {
-            Some(name @ ("search_traces" | "get_passage" | "batch_search")) => {
+            Some(
+                name @ ("search_traces" | "get_passage" | "batch_search" | "list_corpora"
+                | "suggest"),
+            ) => {
                 let args = msg
                     .pointer("/params/arguments")
                     .cloned()
@@ -216,6 +283,25 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
                 "content": [{"type": "text", "text": serde_json::to_string(&out)?}]
             }));
         }
+        // list_corpora / suggest (t3-ixu): proxy the daemon's GETs.
+        if name == "list_corpora" {
+            let mut resp = ureq::get(&format!("{base}/corpora"))
+                .call()
+                .context("daemon /corpora")?;
+            let v: Value = resp.body_mut().read_json().context("daemon response")?;
+            return Ok(tool_response(&json!({"results": v})));
+        }
+        if name == "suggest" {
+            let q = a["query"].as_str().unwrap_or("");
+            let mut resp = ureq::get(&format!("{base}/suggest"))
+                .query("q", q)
+                .call()
+                .context("daemon /suggest")?;
+            let v: Value = resp.body_mut().read_json().context("daemon response")?;
+            return Ok(json!({
+                "content": [{"type": "text", "text": serde_json::to_string(&v)?}]
+            }));
+        }
         // get_passage (t3-vqd): straight GET to the daemon's route —
         // corpus defaults to the daemon's newest when omitted.
         if name == "get_passage" {
@@ -276,7 +362,18 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
                 continue;
             }
         };
-        if let Some(resp) = handle_rpc(&msg, &exec) {
+        // t3-ixu: build ctx lazily — corpora/manifests + the SKILL playbook
+        // so prompts/resources answer without a prior SKILL.md install.
+        let ctx = std::sync::LazyLock::new(|| {
+            let mut corpora = Vec::new();
+            if let Ok(mut r) = ureq::get(&format!("{base}/corpora")).call() {
+                if let Ok(v) = r.body_mut().read_json::<Value>() {
+                    corpora = v.as_array().cloned().unwrap_or_default();
+                }
+            }
+            json!({"corpora": corpora, "playbook": crate::skill::SKILL_MD})
+        });
+        if let Some(resp) = handle_rpc(&msg, &exec, &ctx) {
             writeln!(out, "{resp}")?;
             out.flush()?;
         }
@@ -293,14 +390,14 @@ mod tests {
     #[test]
     fn initialize_returns_server_info() {
         let m = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
-        let r = handle_rpc(&m, &|_, _| unreachable!()).unwrap();
+        let r = handle_rpc(&m, &|_, _| unreachable!(), &json!({})).unwrap();
         assert_eq!(r["result"]["serverInfo"]["name"], "t3rag");
     }
 
     #[test]
     fn tools_list_exposes_search_traces() {
         let m = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
-        let r = handle_rpc(&m, &|_, _| unreachable!()).unwrap();
+        let r = handle_rpc(&m, &|_, _| unreachable!(), &json!({})).unwrap();
         let name = r["result"]["tools"][0]["name"].as_str().unwrap();
         assert_eq!(name, "search_traces");
     }
@@ -311,9 +408,11 @@ mod tests {
             "jsonrpc":"2.0","id":3,"method":"tools/call",
             "params":{"name":"search_traces","arguments":{"query":"q"}}
         });
-        let r = handle_rpc(&m, &|_, _| {
-            Ok(serde_json::json!({"content":[{"type":"text","text":"ok"}]}))
-        })
+        let r = handle_rpc(
+            &m,
+            &|_, _| Ok(serde_json::json!({"content":[{"type":"text","text":"ok"}]})),
+            &json!({}),
+        )
         .unwrap();
         assert_eq!(r["result"]["content"][0]["text"], "ok");
     }
@@ -321,7 +420,7 @@ mod tests {
     #[test]
     fn notification_gets_no_response() {
         let m = serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-        assert!(handle_rpc(&m, &|_, _| unreachable!()).is_none());
+        assert!(handle_rpc(&m, &|_, _| unreachable!(), &json!({})).is_none());
     }
 
     #[test]
@@ -330,7 +429,7 @@ mod tests {
             "jsonrpc":"2.0","id":4,"method":"tools/call",
             "params":{"name":"nope","arguments":{}}
         });
-        let r = handle_rpc(&m, &|_, _| unreachable!()).unwrap();
+        let r = handle_rpc(&m, &|_, _| unreachable!(), &json!({})).unwrap();
         assert!(r["error"]["message"]
             .as_str()
             .unwrap()

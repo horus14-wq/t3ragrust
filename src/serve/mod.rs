@@ -885,10 +885,6 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
                 continue;
             }
         }
-        // t3-kz0: never return the --like seed itself.
-        if req.like.is_some_and(|s| s == id) {
-            continue;
-        }
         let (_name, corpus) = &corpora[ci];
         let p = corpus.reader.get(id)?;
         let parent = if p.parent_id != p.id {
@@ -896,6 +892,11 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         } else {
             p
         };
+        // t3-kz0: never return the --like seed itself — compare the
+        // hydrated parent id (chunk ids differ from the passage id).
+        if req.like.is_some_and(|s| s == parent.id) {
+            continue;
+        }
         if exclude.contains(&parent.id) {
             continue;
         }
@@ -1240,6 +1241,57 @@ async fn mcp_http(
                     }]
                 }));
             }
+            // list_corpora / suggest (t3-ixu): orientation tools —
+            // manifests from disk; routing via the /suggest logic inline.
+            if name == "list_corpora" {
+                let mut out = Vec::new();
+                if let Ok(rd) = std::fs::read_dir(&st.corpora_root) {
+                    for e in rd.flatten() {
+                        if let Ok(m) = store::read_meta(&e.path()) {
+                            out.push(serde_json::json!({
+                                "corpus": e.file_name().to_string_lossy(),
+                                "docs": m.doc_count,
+                                "transform": m.manifest.as_ref()
+                                    .map(|m| m.transform.clone()).unwrap_or_else(|| "unknown".into()),
+                                "top_terms": m.manifest.as_ref()
+                                    .map(|m| m.top_terms.clone()).unwrap_or_default(),
+                            }));
+                        }
+                    }
+                }
+                return Ok(crate::mcp::tool_response(
+                    &serde_json::json!({"corpora": out}),
+                ));
+            }
+            if name == "suggest" {
+                let q = args["query"].as_str().context("suggest requires query")?;
+                let qv = st.embedder.embed_query(q)?;
+                let mut rows = Vec::new();
+                if let Ok(rd) = std::fs::read_dir(&st.corpora_root) {
+                    for e in rd.flatten() {
+                        if let Ok(meta) = store::read_meta(&e.path()) {
+                            let m = meta.manifest.as_ref();
+                            let sim = m.and_then(|m| m.centroid.as_ref()).map(|c| {
+                                let n = qv.len().min(c.len());
+                                let (mut dot, mut na, mut nb) = (0f32, 0f32, 0f32);
+                                for i in 0..n {
+                                    dot += qv[i] * c[i];
+                                    na += qv[i] * qv[i];
+                                    nb += c[i] * c[i];
+                                }
+                                (dot / (na.sqrt() * nb.sqrt()).max(1e-12)) as f64
+                            });
+                            rows.push(serde_json::json!({
+                                "corpus": e.file_name().to_string_lossy(),
+                                "transform": m.map(|m| m.transform.as_str()).unwrap_or("unknown"),
+                                "docs": meta.doc_count,
+                                "similarity": sim,
+                            }));
+                        }
+                    }
+                }
+                return Ok(crate::mcp::tool_response(&serde_json::json!({"corpora": rows})));
+            }
             // get_passage (t3-vqd): pure store read via the loaded corpus —
             // no embed, no fusion; mirrors GET /passages/{corpus}/{id}.
             if name == "get_passage" {
@@ -1306,7 +1358,26 @@ async fn mcp_http(
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))
         };
-        crate::mcp::handle_rpc(&msg2, &exec)
+        // t3-ixu: ctx for prompts/resources — corpus manifests from disk
+        // (loaded or not) + the SKILL playbook.
+        let ctx = {
+            let mut corpora = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(&st.corpora_root) {
+                for e in rd.flatten() {
+                    if let Ok(m) = store::read_meta(&e.path()) {
+                        corpora.push(serde_json::json!({
+                            "name": e.file_name().to_string_lossy(),
+                            "docs": m.doc_count,
+                            "model": m.model,
+                            "dims": m.dims,
+                            "manifest": m.manifest,
+                        }));
+                    }
+                }
+            }
+            serde_json::json!({"corpora": corpora, "playbook": crate::skill::SKILL_MD})
+        };
+        crate::mcp::handle_rpc(&msg2, &exec, &ctx)
     })
     .await;
     match result {
