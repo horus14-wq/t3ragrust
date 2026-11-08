@@ -15,6 +15,7 @@ mod eval;
 mod index;
 mod ingest;
 mod log;
+mod manifest;
 mod mcp;
 mod passage;
 mod paths;

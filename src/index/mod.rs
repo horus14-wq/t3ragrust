@@ -75,6 +75,10 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     // dims (re-normalized); query vectors truncate the same way.
     let store_dims = args.dims.unwrap_or_else(|| emb.dims());
     let mut dense = DenseBuilder::create(&build_dir, store_dims, args.quantization)?;
+    // Aboutness manifest (t3-iv2): accumulates transform type, question
+    // terms, length histogram, language, and the passage-vector centroid
+    // for meta.json — corpus routing for `suggest`/`list`.
+    let mut manifest = crate::manifest::ManifestAcc::new(store_dims);
 
     // Sparse leg (t3-css.4.3): SPLADE alongside dense when --sparse.
     let mut sparse_sink: Option<SparseSink> = None;
@@ -134,12 +138,20 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
                 p = c;
                 writer.push(&p)?;
                 lex.add(&p)?;
+                manifest.observe(&p);
                 let est = crate::chunk::est_tokens(&p.text).max(1);
                 if !batch.is_empty()
                     && (batch.len() == args.embed_batch
                         || batch_tokens + est > args.embed_token_budget)
                 {
-                    flush_batch(&emb, &mut dense, &mut batch, store_dims, &mut sparse_sink)?;
+                    flush_batch(
+                        &emb,
+                        &mut dense,
+                        &mut batch,
+                        store_dims,
+                        &mut sparse_sink,
+                        &mut manifest,
+                    )?;
                     batch_tokens = 0;
                 }
                 batch_tokens += est;
@@ -151,12 +163,20 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         next_id += 1;
         writer.push(&p)?;
         lex.add(&p)?;
+        manifest.observe(&p);
         // Cheap token estimate (~3 chars/token) for the budget check.
         let est = (p.text.len() / 3).max(1);
         if !batch.is_empty()
             && (batch.len() == args.embed_batch || batch_tokens + est > args.embed_token_budget)
         {
-            flush_batch(&emb, &mut dense, &mut batch, store_dims, &mut sparse_sink)?;
+            flush_batch(
+                &emb,
+                &mut dense,
+                &mut batch,
+                store_dims,
+                &mut sparse_sink,
+                &mut manifest,
+            )?;
             batch_tokens = 0;
             if next_id % 1024 < args.embed_batch as u64 {
                 info!(docs = next_id, stats = %stats, "indexing");
@@ -165,7 +185,14 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         batch_tokens += est;
         batch.push((p.id, p.text));
     }
-    flush_batch(&emb, &mut dense, &mut batch, store_dims, &mut sparse_sink)?;
+    flush_batch(
+        &emb,
+        &mut dense,
+        &mut batch,
+        store_dims,
+        &mut sparse_sink,
+        &mut manifest,
+    )?;
     if chunked > 0 {
         info!(chunked_parents = chunked, "structural chunking applied");
     }
@@ -195,6 +222,7 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
             args.input.display()
         )),
         instruction: Some(spec.passage_instruction.clone()),
+        manifest: Some(manifest.finish()),
         index_params: Some(serde_json::json!({
             "embed_batch": args.embed_batch,
             "embed_token_budget": args.embed_token_budget,
@@ -242,6 +270,7 @@ fn flush_batch(
     batch: &mut Vec<(u64, String)>,
     store_dims: usize,
     #[allow(unused_variables)] sparse_sink: &mut Option<SparseSink>,
+    manifest: &mut crate::manifest::ManifestAcc,
 ) -> Result<()> {
     if batch.is_empty() {
         return Ok(());
@@ -256,6 +285,7 @@ fn flush_batch(
     }
     for ((id, _), v) in batch.drain(..).zip(vecs) {
         let v = crate::search::truncate_unit(&v, store_dims);
+        manifest.observe_vector(&v);
         dense.add(id, &v)?;
     }
     Ok(())

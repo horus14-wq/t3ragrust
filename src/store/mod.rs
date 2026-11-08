@@ -40,6 +40,10 @@ pub struct CorpusMeta {
     /// Index-time knobs that produced this corpus.
     #[serde(default)]
     pub index_params: Option<serde_json::Value>,
+    /// Aboutness manifest (t3-iv2): transform type, top terms, length
+    /// histogram, language, centroid — corpus routing for `suggest`.
+    #[serde(default)]
+    pub manifest: Option<crate::manifest::CorpusManifest>,
 }
 
 /// Serialize `meta` to `<dir>/meta.json` (pretty-printed).

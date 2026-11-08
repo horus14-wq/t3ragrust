@@ -39,13 +39,19 @@ pub fn run_list() -> Result<()> {
     }
     rows.sort_by(|a, b| a.0.cmp(&b.0));
     println!(
-        "{:<18} {:>7} {:>5} {:>9}  {:<44} {:>9}",
-        "corpus", "docs", "dims", "size", "model", "mtime"
+        "{:<18} {:<8} {:>7} {:>5} {:>9}  {:<44} {:>9}",
+        "corpus", "type", "docs", "dims", "size", "model", "mtime"
     );
     for (name, meta, size, mtime) in &rows {
+        let ty = meta
+            .manifest
+            .as_ref()
+            .map(|m| m.transform.as_str())
+            .unwrap_or("-");
         println!(
-            "{:<18} {:>7} {:>5} {:>9}  {:<44} {:>9}",
+            "{:<18} {:<8} {:>7} {:>5} {:>9}  {:<44} {:>9}",
             name,
+            ty,
             meta.doc_count,
             meta.dims,
             human_bytes(*size),
@@ -73,6 +79,41 @@ pub fn run_stats(name: Option<String>) -> Result<()> {
     println!("model:       {}", meta.model);
     println!("quantization:{}", meta.quantization);
     println!("format:      v{}", meta.format_version);
+    if let Some(m) = &meta.manifest {
+        println!("aboutness:   {}", m.transform);
+        if !m.transform_mix.is_empty() {
+            let mix: Vec<String> = m
+                .transform_mix
+                .iter()
+                .map(|(k, v)| format!("{k}:{v}"))
+                .collect();
+            println!("  mix:       {}", mix.join(" "));
+        }
+        if !m.top_terms.is_empty() {
+            println!("  terms:     {}", m.top_terms.join(", "));
+        }
+        let total: u64 = m.length_histogram.iter().sum();
+        if total > 0 {
+            println!(
+                "  lengths:   <500:{} 500-2k:{} 2-8k:{} >=8k:{}",
+                m.length_histogram[0],
+                m.length_histogram[1],
+                m.length_histogram[2],
+                m.length_histogram[3]
+            );
+        }
+        if let Some(lang) = &m.language {
+            println!("  language:  {lang}");
+        }
+        if let Some(c) = &m.centroid {
+            println!("  centroid:  {}d (secondary routing signal)", c.len());
+        }
+    }
+    // Staleness (t3-ao9): origin carries host:user:input-path; warn when
+    // the source is newer than the index.
+    if let Some(stale) = staleness_note(&meta, &dir) {
+        println!("{stale}");
+    }
     println!("files:");
     for e in std::fs::read_dir(&dir)? {
         let p = e?.path();
@@ -186,6 +227,65 @@ pub fn run_health() -> Result<()> {
         println!("OK (cache root will be created)");
     }
     Ok(())
+}
+
+/// Staleness check (t3-ao9): `meta.origin` is `host:user:input-path`;
+/// warn when the input's newest mtime is newer than `meta.json`'s.
+/// Returns a ready-to-print line, or `None` when fresh/unknown.
+fn staleness_note(meta: &CorpusMeta, dir: &std::path::Path) -> Option<String> {
+    let origin = meta.origin.as_ref()?;
+    // origin = host:user:input-path — input is last so splitn keeps colons.
+    let input = origin.splitn(3, ':').nth(2)?;
+    let input = std::path::Path::new(input);
+    if !input.exists() {
+        return None;
+    }
+    let input_mtime = if input.is_file() {
+        input.metadata().ok()?.modified().ok()?
+    } else {
+        // Directory input: newest file inside (bounded walk).
+        let mut newest = input.metadata().ok()?.modified().ok()?;
+        for e in walk_files(input, 0) {
+            if let Ok(m) = e.metadata().and_then(|m| m.modified()) {
+                if m > newest {
+                    newest = m;
+                }
+            }
+        }
+        newest
+    };
+    let index_mtime = std::fs::metadata(dir.join("meta.json"))
+        .and_then(|m| m.modified())
+        .ok()?;
+    (input_mtime > index_mtime).then(|| {
+        format!(
+            "stale:       input {} is newer than the index — rebuild to refresh",
+            input.display()
+        )
+    })
+}
+
+/// Bounded recursive file walk for the staleness check (depth <= 4,
+/// <= 4096 entries — stats must stay cheap).
+fn walk_files(dir: &std::path::Path, depth: usize) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if depth > 4 || out.len() >= 4096 {
+        return out;
+    }
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten().take(4096) {
+            let p = e.path();
+            if p.is_dir() {
+                out.extend(walk_files(&p, depth + 1));
+            } else {
+                out.push(p);
+            }
+            if out.len() >= 4096 {
+                break;
+            }
+        }
+    }
+    out
 }
 
 fn human_bytes(b: u64) -> String {
