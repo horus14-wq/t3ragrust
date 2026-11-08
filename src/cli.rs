@@ -130,6 +130,18 @@ pub struct ServeArgs {
     /// Preload a corpus at startup (repeatable; default: none until first query).
     #[arg(long)]
     pub corpus: Vec<String>,
+    /// Embedding model override (default: Qwen3-Embedding-0.6B ONNX).
+    #[arg(long)]
+    pub model: Option<String>,
+    /// ONNX execution provider (see `t3rag index --ep`).
+    #[arg(long, value_enum, default_value_t = Ep::Auto)]
+    pub ep: Ep,
+    /// Parallel embedding sessions (inference semaphore size).
+    #[arg(long, default_value_t = 2)]
+    pub pool: usize,
+    /// ORT intra-op threads per session (0 = cores/pool).
+    #[arg(long, default_value_t = 0)]
+    pub threads: usize,
 }
 
 #[derive(Args)]

@@ -42,8 +42,68 @@ pub fn rrf_fuse(legs: &[Vec<(u64, f32)>]) -> Vec<(u64, f32)> {
     v
 }
 
-/// `t3rag search` entry point — cold in-process path (t3-wkp.9).
+/// `t3rag search` entry point — thin-client daemon path first (t3-wkp.13),
+/// falling back to the cold in-process path when no daemon is discoverable
+/// (or it errors), unless `--no-daemon` forces cold.
 pub fn run_search(args: SearchArgs) -> Result<()> {
+    if !args.no_daemon {
+        if let Some(base) = crate::serve::discover_daemon() {
+            match thin_search(&base, &args) {
+                Ok(resp) => {
+                    print_response(&resp, args.json)?;
+                    return Ok(());
+                }
+                Err(e) => warn!("daemon query failed ({e:#}); falling back to cold path"),
+            }
+        }
+    }
+    run_cold_search(args)
+}
+
+/// Thin client: POST the query to the resident daemon (t3-wkp.13).
+fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
+    let resp = ureq::post(&format!("{base}/search"))
+        .send_json(serde_json::json!({
+            "query": args.query,
+            "corpus": args.corpus,
+            "top_k": args.top_k,
+            "candidates": args.candidates,
+            "rerank": args.rerank && !args.no_rerank,
+        }))
+        .context("daemon POST /search")?;
+    if resp.status() != 200 {
+        anyhow::bail!("daemon returned {}", resp.status());
+    }
+    resp.into_json().context("parse daemon response")
+}
+
+/// Shared renderer for daemon (thin-client) results.
+fn print_response(v: &serde_json::Value, json: bool) -> Result<()> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(v)?);
+        return Ok(());
+    }
+    if let Some(results) = v.get("results").and_then(|r| r.as_array()) {
+        for r in results {
+            println!(
+                "--- [{}] id={} score={:.4}",
+                r["rank"].as_u64().unwrap_or(0),
+                r["passage_id"].as_u64().unwrap_or(0),
+                r["score"].as_f64().unwrap_or(0.0)
+            );
+            if let Some(t) = r["title"].as_str() {
+                println!("title: {t}");
+            }
+            if let Some(t) = r["text"].as_str() {
+                println!("{}", t.trim());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Cold in-process path (t3-wkp.9): load model + indexes locally.
+fn run_cold_search(args: SearchArgs) -> Result<()> {
     let corpus = resolve_corpus(args.corpus.as_deref())?;
     let meta = store::read_meta(&corpus)?;
 

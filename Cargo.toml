@@ -25,6 +25,9 @@ arrow = { version = "55", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 postcard = { version = "1", features = ["alloc"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+ureq = { version = "2", default-features = false }
+axum = { version = "0.8", features = ["json"] }
 
 # Execution-provider build variants. ort-sys ships ONE binary flavor per
 # build — enable at most one ep-* feature at a time (e.g.
