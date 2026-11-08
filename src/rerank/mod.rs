@@ -330,8 +330,7 @@ mod tests {
         let Some(home) = dirs::home_dir() else {
             return;
         };
-        let root = home
-            .join(".cache/huggingface/hub/models--Xenova--ms-marco-MiniLM-L-6-v2");
+        let root = home.join(".cache/huggingface/hub/models--Xenova--ms-marco-MiniLM-L-6-v2");
         let Ok(e) = std::fs::read_dir(root.join("snapshots")) else {
             return; // model not cached in this env — skip
         };
