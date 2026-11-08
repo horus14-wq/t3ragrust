@@ -16,6 +16,9 @@ use crate::cli::EvalArgs;
 #[derive(Deserialize)]
 struct EvalQuery {
     query: String,
+    /// Extra phrasings fused into the ranking (t3-css.4.4 multi-query).
+    #[serde(default)]
+    also: Vec<String>,
     #[serde(default)]
     relevant_ids: Vec<u64>,
 }
@@ -116,7 +119,7 @@ fn eval_corpus(
     let mut ndcg_sum = 0f64;
     let mut n = 0usize;
     for q in queries {
-        let ids = search_ids(base, corpus, &q.query, args)?;
+        let ids = search_ids(base, corpus, &q.query, &q.also, args)?;
         let rel: HashSet<u64> = q.relevant_ids.iter().cloned().collect();
         let first_hit = ids.iter().position(|id| rel.contains(id));
         for (i, k) in ks.iter().enumerate() {
@@ -155,10 +158,17 @@ fn eval_corpus(
 }
 
 /// Query the daemon; return ranked passage ids (top-10 for nDCG@10).
-fn search_ids(base: &str, corpus: &str, query: &str, args: &EvalArgs) -> Result<Vec<u64>> {
+fn search_ids(
+    base: &str,
+    corpus: &str,
+    query: &str,
+    also: &[String],
+    args: &EvalArgs,
+) -> Result<Vec<u64>> {
     let mut resp = ureq::post(&format!("{base}/search"))
         .send_json(serde_json::json!({
             "query": query,
+            "queries": also,
             "corpus": corpus,
             "top_k": 10,
             "rerank": args.rerank,

@@ -51,6 +51,7 @@ fn tools_list() -> Value {
                     "max_chars": {"type": "integer", "description": "truncate passage text"},
                     "min_score": {"type": "number", "description": "drop hits below score"},
                     "sparse": {"type": "boolean", "default": false, "description": "add the learned SPLADE leg (corpus must have sparse.bin)"},
+                    "queries": {"type": "array", "items": {"type": "string"}, "description": "extra query phrasings fused into the ranking"},
                     "rerank_candidates": {"type": "integer", "description": "candidates fed to reranker"},
                     "preset": {"type": "string", "enum": ["fast", "balanced", "max"], "description": "quality preset (sets candidates/rerank defaults)"},
                     "model": {"type": "string", "description": "embedding model repo override (must match the daemon's)"}

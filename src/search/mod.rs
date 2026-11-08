@@ -204,6 +204,7 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "min_score": args.min_score,
             "offset": args.offset,
             "sparse": args.sparse,
+            "queries": args.also,
         }))
         .context("daemon POST /search")?;
     if resp.status().as_u16() != 200 {
@@ -264,6 +265,10 @@ fn print_response(v: &serde_json::Value, fmt: crate::cli::OutFmt) -> Result<()> 
 
 /// Cold in-process path (t3-wkp.9): load model + indexes locally.
 fn run_cold_search(args: SearchArgs) -> Result<()> {
+    // Multi-query fusion (t3-css.4.4) lives in the daemon's do_search.
+    if !args.also.is_empty() {
+        anyhow::bail!("--also requires the daemon path — drop --no-daemon");
+    }
     let corpus = resolve_corpus(args.corpus.as_deref())?;
     let meta = store::read_meta(&corpus)?;
 

@@ -134,6 +134,9 @@ struct SearchRequest {
     /// Third RRF leg: learned sparse (SPLADE) if the corpus has sparse.bin.
     #[allow(dead_code)]
     sparse: Option<bool>,
+    /// Extra query phrasings (t3-css.4.4): each is embedded + ranked,
+    /// all rankings fused into one RRF merge.
+    queries: Option<Vec<String>>,
     filter: Option<Vec<String>>,
     max_per_source: Option<usize>,
     max_chars: Option<usize>,
@@ -492,22 +495,30 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     let cand = req.candidates.unwrap_or(pc);
     let want_rerank = req.rerank.unwrap_or(pr);
 
+    // Multi-query (t3-css.4.4): the primary query plus `queries`
+    // extras — each embedded, its rankings fused into the same merge.
+    let mut queries = Vec::with_capacity(1 + req.queries.as_ref().map_or(0, |q| q.len()));
+    queries.push(req.query.clone());
+    if let Some(extra) = &req.queries {
+        queries.extend(extra.iter().cloned());
+    }
     let t_embed = Instant::now();
-    let cached = st.query_cache.lock().unwrap().get(&req.query);
-    let qvec = match cached {
-        Some(v) => v,
-        None => {
-            let v = {
-                tracing::debug!("stage: embed start");
-                st.embedder.embed_query(&req.query)?
-            };
-            st.query_cache
-                .lock()
-                .unwrap()
-                .put(req.query.clone(), v.clone());
-            v
-        }
-    };
+    let mut qvecs = Vec::with_capacity(queries.len());
+    for q in &queries {
+        let cached = st.query_cache.lock().unwrap().get(q);
+        let v = match cached {
+            Some(v) => v,
+            None => {
+                let v = {
+                    tracing::debug!("stage: embed start");
+                    st.embedder.embed_query(q)?
+                };
+                st.query_cache.lock().unwrap().put(q.clone(), v.clone());
+                v
+            }
+        };
+        qvecs.push(v);
+    }
     let embed_ms = t_embed.elapsed().as_secs_f64() * 1000.0;
     tracing::debug!("stage: embed done");
     // Multi-corpus legs (t3-css.3.4): same qvec against every corpus,
@@ -526,18 +537,36 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
     }
     let mut per_corpus: Vec<CorpusLegs> = Vec::new();
     for (ci, (_name, corpus)) in corpora.iter().enumerate() {
-        // MRL dims (t3-css.2.4): match each corpus's stored dims.
-        let qv = crate::search::truncate_unit(&qvec, corpus.meta.dims as usize);
-        let ann = if req.exact == Some(true) {
-            corpus.dense.exact_search(&qv, cand)?
-        } else {
-            corpus.dense.search(&qv, cand, req.ef_search)?
-        };
-        dense_ms += t_dense.elapsed().as_secs_f64() * 1000.0;
-        let bm = corpus.lex.search(&req.query, cand).unwrap_or_default();
-        bm25_ms += t_bm.elapsed().as_secs_f64() * 1000.0;
-        let ann_map: rustc_hash::FxHashMap<u64, f32> = ann.iter().cloned().collect();
-        let bm_map: rustc_hash::FxHashMap<u64, f32> = bm.iter().cloned().collect();
+        // Multi-query (t3-css.4.4): every query phrasing contributes its
+        // own legs; they're all fused into one ranking below.
+        let mut all_legs: Vec<Vec<(u64, f32)>> = Vec::new();
+        let mut all_weights: Vec<f32> = Vec::new();
+        let mut ann_map: rustc_hash::FxHashMap<u64, f32> = Default::default();
+        let mut bm_map: rustc_hash::FxHashMap<u64, f32> = Default::default();
+        for (q, qvec) in queries.iter().zip(&qvecs) {
+            // MRL dims (t3-css.2.4): match each corpus's stored dims.
+            let qv = crate::search::truncate_unit(qvec, corpus.meta.dims as usize);
+            let ann = if req.exact == Some(true) {
+                corpus.dense.exact_search(&qv, cand)?
+            } else {
+                corpus.dense.search(&qv, cand, req.ef_search)?
+            };
+            dense_ms += t_dense.elapsed().as_secs_f64() * 1000.0;
+            let bm = corpus.lex.search(q, cand).unwrap_or_default();
+            bm25_ms += t_bm.elapsed().as_secs_f64() * 1000.0;
+            for (id, s) in &ann {
+                let e = ann_map.entry(*id).or_insert(f32::NEG_INFINITY);
+                *e = e.max(*s);
+            }
+            for (id, s) in &bm {
+                let e = bm_map.entry(*id).or_insert(f32::NEG_INFINITY);
+                *e = e.max(*s);
+            }
+            all_legs.push(ann);
+            all_weights.push(req.dense_weight.unwrap_or(1.0));
+            all_legs.push(bm);
+            all_weights.push(req.bm25_weight.unwrap_or(1.0));
+        }
         // Third leg (t3-css.4.3): SPLADE when requested + sparse.bin exists.
         #[cfg(feature = "sparse")]
         let sparse_leg: Vec<(u64, f32)> = if req.sparse == Some(true) {
@@ -572,26 +601,15 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         };
         #[cfg(not(feature = "sparse"))]
         let sparse_leg: Vec<(u64, f32)> = Vec::new();
-        let fused = if sparse_leg.is_empty() {
-            rrf_fuse(
-                &[ann, bm],
-                req.rrf_k.unwrap_or(crate::search::RRF_K),
-                &[
-                    req.dense_weight.unwrap_or(1.0),
-                    req.bm25_weight.unwrap_or(1.0),
-                ],
-            )
-        } else {
-            rrf_fuse(
-                &[ann, bm, sparse_leg],
-                req.rrf_k.unwrap_or(crate::search::RRF_K),
-                &[
-                    req.dense_weight.unwrap_or(1.0),
-                    req.bm25_weight.unwrap_or(1.0),
-                    1.0,
-                ],
-            )
-        };
+        if !sparse_leg.is_empty() {
+            all_legs.push(sparse_leg);
+            all_weights.push(1.0);
+        }
+        let fused = rrf_fuse(
+            &all_legs,
+            req.rrf_k.unwrap_or(crate::search::RRF_K),
+            &all_weights,
+        );
         per_corpus.push(CorpusLegs {
             ci,
             dense_map: ann_map,
@@ -809,6 +827,11 @@ async fn mcp_http(
                 min_score: args["min_score"].as_f64().map(|v| v as f32),
                 offset: args["offset"].as_u64().map(|v| v as usize),
                 sparse: args["sparse"].as_bool(),
+                queries: args["queries"].as_array().map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                }),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))

@@ -171,6 +171,10 @@ pub struct IndexArgs {
 pub struct SearchArgs {
     /// The query text.
     pub query: String,
+    /// Extra query phrasings (repeatable) — each is embedded and its
+    /// rankings fused into the same RRF merge (t3-css.4.4 multi-query).
+    #[arg(long = "also", value_name = "QUERY")]
+    pub also: Vec<String>,
     /// Corpus to search — name, comma-list, or 'all' (default: newest).
     #[arg(long, env = "T3RAG_CORPUS")]
     pub corpus: Option<String>,
