@@ -19,6 +19,7 @@ impl Cli {
             Command::Serve(args) => crate::serve::run_serve(args),
             Command::Mcp(args) => crate::mcp::run_mcp(args),
             Command::Eval(args) => crate::eval::run_eval(args),
+            Command::Bench(args) => crate::bench::run_bench(args),
             Command::Skill(args) => crate::skill::run_skill(args),
         }
     }
@@ -36,6 +37,8 @@ pub enum Command {
     Mcp(McpArgs),
     /// Retrieval evaluation: recall@k / MRR / nDCG over a queries file.
     Eval(EvalArgs),
+    /// Latency bench: p50/p95/p99 per stage through the daemon.
+    Bench(BenchArgs),
     /// Emit or install a SKILL.md wrapper for agent discovery.
     Skill(SkillArgs),
 }
@@ -189,6 +192,38 @@ pub struct EvalArgs {
     /// Fast preset (no rerank, fewer candidates).
     #[arg(long)]
     pub fast: bool,
+    /// JSON output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Args)]
+pub struct BenchArgs {
+    /// Query text (one line; bench repeats it — LRU dedupes query embed,
+    /// which is the point: measures the warm resident path).
+    #[arg(long)]
+    pub query: String,
+    /// Corpus (default: newest).
+    #[arg(long)]
+    pub corpus: Vec<String>,
+    /// Warm iterations.
+    #[arg(long, default_value_t = 20)]
+    pub iterations: usize,
+    /// Also measure cold-start (spawn + first query).
+    #[arg(long)]
+    pub cold: bool,
+    /// Cross-encoder rerank.
+    #[arg(long)]
+    pub rerank: bool,
+    /// Brute-force exact scan.
+    #[arg(long)]
+    pub exact: bool,
+    /// Passages to return.
+    #[arg(long, default_value_t = 3)]
+    pub top_k: usize,
+    /// Fused candidates.
+    #[arg(long, default_value_t = 50)]
+    pub candidates: usize,
     /// JSON output.
     #[arg(long)]
     pub json: bool,

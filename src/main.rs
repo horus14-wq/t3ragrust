@@ -1,3 +1,4 @@
+mod bench;
 mod chunk;
 mod cli;
 mod embed;
