@@ -171,13 +171,16 @@ pub fn run_publish(args: crate::cli::PublishArgs) -> Result<()> {
     let dir = root.join(&name);
     let meta =
         crate::store::read_meta(&dir).with_context(|| format!("corpus '{name}' not indexed"))?;
+    let install = match &args.subdir {
+        Some(s) => format!("t3rag pull --repo {} --subdir {s}", args.repo),
+        None => format!("t3rag pull --repo {}", args.repo),
+    };
     let card = format!(
         "---\ntags: [t3rag]\n---\n\
          # t3rag corpus `{name}`\n\n\
-         Pre-built retrieval index. Install with `t3rag pull --repo {}`.\n\n\
+         Pre-built retrieval index. Install with `{install}`.\n\n\
          - t3rag: {}\n- model: {}\n- dims: {}\n- quantization: {}\n\
          - docs: {}\n- origin: {}\n",
-        args.repo,
         env!("CARGO_PKG_VERSION"),
         meta.model,
         meta.dims,
@@ -197,23 +200,44 @@ pub fn run_publish(args: crate::cli::PublishArgs) -> Result<()> {
         }
         Ok(())
     };
-    run(&[
-        "upload",
-        &args.repo,
-        &dir.to_string_lossy(),
-        "--repo-type",
-        &args.repo_type,
-    ])?;
+    match &args.subdir {
+        Some(s) => run(&[
+            "upload",
+            &args.repo,
+            &dir.to_string_lossy(),
+            s,
+            "--repo-type",
+            &args.repo_type,
+        ])?,
+        None => run(&[
+            "upload",
+            &args.repo,
+            &dir.to_string_lossy(),
+            "--repo-type",
+            &args.repo_type,
+        ])?,
+    }
+    let card_path = match &args.subdir {
+        Some(s) => format!("{s}/README.md"),
+        None => "README.md".to_string(),
+    };
     run(&[
         "upload",
         &args.repo,
         &tmp.to_string_lossy(),
-        "README.md",
+        &card_path,
         "--repo-type",
         &args.repo_type,
     ])?;
     println!("published '{name}' -> {} ({})", dir.display(), args.repo);
     Ok(())
+}
+
+fn pull_target_name(repo: &str, name: Option<&str>, subdir: Option<&str>) -> Option<String> {
+    name.map(String::from).or_else(|| {
+        let src = subdir.unwrap_or(repo);
+        src.rsplit('/').find(|c| !c.is_empty()).map(String::from)
+    })
 }
 
 /// `t3rag pull` — download a published corpus into the corpora root so
@@ -224,28 +248,59 @@ pub fn run_publish(args: crate::cli::PublishArgs) -> Result<()> {
 /// The target exists, `hf` fails, or the download lacks `meta.json`.
 pub fn run_pull(args: crate::cli::PullArgs) -> Result<()> {
     let root = paths::corpora_root()?;
-    let name = args
-        .name
-        .clone()
-        .or_else(|| args.repo.rsplit('/').next().map(String::from))
+    let name = pull_target_name(&args.repo, args.name.as_deref(), args.subdir.as_deref())
         .context("--name required when repo has no name component")?;
     let dir = root.join(&name);
     if dir.exists() {
         anyhow::bail!("corpus '{name}' already exists at {}", dir.display());
     }
-    let st = std::process::Command::new("hf")
-        .args([
-            "download",
-            &args.repo,
-            "--repo-type",
-            &args.repo_type,
-            "--local-dir",
-            &dir.to_string_lossy(),
-        ])
-        .status()
-        .context("run `hf` — is the Hugging Face CLI installed?")?;
-    if !st.success() {
-        anyhow::bail!("hf download exited {st}");
+    match &args.subdir {
+        Some(s) => {
+            let staging = root.join(format!(".pull-{name}"));
+            if staging.exists() {
+                anyhow::bail!(
+                    "stale staging dir {} — remove it and retry",
+                    staging.display()
+                );
+            }
+            let st = std::process::Command::new("hf")
+                .args([
+                    "download",
+                    &args.repo,
+                    "--repo-type",
+                    &args.repo_type,
+                    "--include",
+                    &format!("{s}/*"),
+                    "--local-dir",
+                    &staging.to_string_lossy(),
+                ])
+                .status()
+                .context("run `hf` — is the Hugging Face CLI installed?")?;
+            if !st.success() {
+                anyhow::bail!("hf download exited {st}");
+            }
+            std::fs::rename(staging.join(s), &dir).with_context(|| {
+                format!("downloaded {} missing subdir '{s}'", staging.display())
+            })?;
+            std::fs::remove_dir_all(&staging)
+                .with_context(|| format!("clean staging {}", staging.display()))?;
+        }
+        None => {
+            let st = std::process::Command::new("hf")
+                .args([
+                    "download",
+                    &args.repo,
+                    "--repo-type",
+                    &args.repo_type,
+                    "--local-dir",
+                    &dir.to_string_lossy(),
+                ])
+                .status()
+                .context("run `hf` — is the Hugging Face CLI installed?")?;
+            if !st.success() {
+                anyhow::bail!("hf download exited {st}");
+            }
+        }
     }
     crate::store::read_meta(&dir)
         .with_context(|| format!("{} has no valid meta.json — not a t3rag corpus?", args.repo))?;
@@ -502,4 +557,29 @@ pub fn run_selftest() -> Result<()> {
     Cli::command().debug_assert();
     println!("OK");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pull_target_name;
+
+    #[test]
+    fn pull_name_resolution() {
+        assert_eq!(
+            pull_target_name("owner/ds", None, None).as_deref(),
+            Some("ds")
+        );
+        assert_eq!(
+            pull_target_name("owner/ds", None, Some("struct")).as_deref(),
+            Some("struct")
+        );
+        assert_eq!(
+            pull_target_name("owner/ds", None, Some("a/b/")).as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            pull_target_name("owner/ds", Some("mine"), Some("a/b")).as_deref(),
+            Some("mine")
+        );
+    }
 }

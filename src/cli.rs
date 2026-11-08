@@ -614,6 +614,9 @@ pub struct PublishArgs {
     /// HF repo type.
     #[arg(long, default_value = "dataset")]
     pub repo_type: String,
+    /// Subdirectory within the repo to upload into (multi-corpus repos).
+    #[arg(long)]
+    pub subdir: Option<String>,
 }
 
 /// Arguments for `t3rag pull` (HF dataset repo -> local corpus).
@@ -628,6 +631,9 @@ pub struct PullArgs {
     /// HF repo type.
     #[arg(long, default_value = "dataset")]
     pub repo_type: String,
+    /// Subdirectory within the repo to pull (default name: its last path component).
+    #[arg(long)]
+    pub subdir: Option<String>,
 }
 
 /// Verdict on a search hit set (t3-bj5).

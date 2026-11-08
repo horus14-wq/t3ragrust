@@ -140,7 +140,9 @@ corpus manifests.
 t3rag list                 # names, doc counts, loaded state
 t3rag stats                # per-corpus details + removal recipe
 t3rag publish --name c --repo user/ds   # upload via `hf` CLI (card generated)
+t3rag publish --name c --repo user/ds --subdir c   # upload into repo subdir (multi-corpus repos)
 t3rag pull --repo user/ds --name c      # download + validate meta.json
+t3rag pull --repo user/ds --subdir c    # pull one subdir (local name defaults to subdir basename)
 ```
 
 There is deliberately **no `t3rag forget`** — deletion stays a user-run
