@@ -2,10 +2,11 @@
 //!
 //! Two artifacts are written per corpus:
 //! - `vectors.usearch` — the HNSW graph (quantized)
-//! - `vectors.raw.f32` — flat `[u64 n][u64 dims][n*dims f32]` canonical blob:
-//!   brute-force exact-scan reference (t3-wkp.6 recall checks + `--exact`
-//!   mode) and lets us rebuild the ANN with different params/quantization
-//!   without re-embedding.
+//! - `vectors.raw.f32` — `[u64 n][u64 dims]` header then n records of
+//!   `[u64 passage_id][f32 x dims]`: brute-force exact-scan reference
+//!   (t3-wkp.6 recall checks + `--exact` mode) and lets us rebuild the ANN
+//!   with different params/quantization without re-embedding. Ids are stored
+//!   explicitly because chunking embeds a subset of stored passages.
 
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -70,6 +71,8 @@ impl DenseBuilder {
         );
         raw.write_all(&0u64.to_le_bytes())?; // n placeholder, patched at finish
         raw.write_all(&(dims as u64).to_le_bytes())?;
+        // Each record: [u64 passage_id][dims f32] — ids explicit since
+        // chunking may skip embedding stored (parent) passages.
         Ok(Self {
             index,
             raw,
@@ -94,6 +97,7 @@ impl DenseBuilder {
         self.index
             .add(id, vector)
             .map_err(|e| anyhow::anyhow!("usearch add: {e}"))?;
+        self.raw.write_all(&id.to_le_bytes())?;
         for v in vector {
             self.raw.write_all(&v.to_le_bytes())?;
         }
@@ -170,17 +174,19 @@ impl DenseIndex {
         if dims != self.dims {
             bail!("raw blob dims {dims} != index dims {}", self.dims);
         }
-        let stride = dims * 4;
+        let stride = 8 + dims * 4; // id + vector per record
         let mut scored: Vec<(u64, f32)> = Vec::with_capacity(n);
         for i in 0..n {
-            let row = buf
+            let rec = buf
                 .get(16 + i * stride..16 + (i + 1) * stride)
                 .with_context(|| format!("raw blob truncated at row {i}"))?;
+            let id = u64::from_le_bytes(rec[0..8].try_into().unwrap());
+            let row = &rec[8..];
             let mut dot = 0f32;
             for (j, &q) in query.iter().enumerate() {
                 dot += q * f32::from_le_bytes(row[j * 4..j * 4 + 4].try_into().unwrap());
             }
-            scored.push((i as u64, dot));
+            scored.push((id, dot));
         }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored.truncate(k);

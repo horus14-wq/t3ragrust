@@ -51,11 +51,44 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     let mut next_id = 0u64;
     let mut batch: Vec<(u64, String)> = Vec::with_capacity(EMBED_BATCH);
     let mut batch_tokens = 0usize;
+    let mut chunked = 0u64;
     for raw in iter {
         let raw = raw?;
-        let Some(p) = ingest::to_passage(raw, next_id, &stats) else {
+        let Some(mut p) = ingest::to_passage(raw, next_id, &stats) else {
             continue;
         };
+
+        if crate::chunk::needs_chunk(&p.text) {
+            // Structural chunking (t3-wkp.11): store the parent for hydration
+            // (no vector, no BM25 doc); index the chunks as retrievable units.
+            chunked += 1;
+            let parent_id = p.id;
+            writer.push(&p)?;
+            next_id += 1;
+            for (ci, text) in crate::chunk::split(&p.text).into_iter().enumerate() {
+                let mut c = crate::passage::Passage::new(next_id, text);
+                c.title = p.title.clone();
+                c.question = p.question.clone();
+                c.source = p.source.clone();
+                c.parent_id = parent_id;
+                c.chunk_idx = ci as u32;
+                next_id += 1;
+                p = c;
+                writer.push(&p)?;
+                lex.add(&p)?;
+                let est = crate::chunk::est_tokens(&p.text).max(1);
+                if !batch.is_empty()
+                    && (batch.len() == EMBED_BATCH || batch_tokens + est > EMBED_TOKEN_BUDGET)
+                {
+                    flush_batch(&emb, &mut dense, &mut batch)?;
+                    batch_tokens = 0;
+                }
+                batch_tokens += est;
+                batch.push((p.id, p.text));
+            }
+            continue;
+        }
+
         next_id += 1;
         writer.push(&p)?;
         lex.add(&p)?;
@@ -74,12 +107,17 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
         batch.push((p.id, p.text));
     }
     flush_batch(&emb, &mut dense, &mut batch)?;
+    if chunked > 0 {
+        info!(chunked_parents = chunked, "structural chunking applied");
+    }
 
     let n = writer.finish()?;
     let nd = dense.finish()?;
     lex.commit()?;
-    if n != nd as u64 {
-        bail!("store wrote {n} passages but dense index has {nd}");
+    // Parents are stored for hydration but never embedded — dense count is
+    // store count minus un-embedded parents.
+    if nd as u64 != n - chunked {
+        bail!("dense index {nd} != embedded passages {}", n - chunked);
     }
 
     let meta = CorpusMeta {

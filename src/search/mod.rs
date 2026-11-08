@@ -95,17 +95,31 @@ pub fn run_search(args: SearchArgs) -> Result<()> {
         ranked = reranked;
     }
 
+    // Hydrate + dedupe by parent (t3-wkp.11): a chunk hit returns its whole
+    // parent passage; multiple chunks of one parent collapse to the best.
     let mut hits = Vec::new();
-    for (id, score) in ranked.into_iter().take(args.top_k) {
+    let mut seen_parents = std::collections::HashSet::new();
+    for (id, score) in ranked {
         let p = reader.get(id)?;
+        let parent = if p.parent_id != p.id {
+            reader.get(p.parent_id)?
+        } else {
+            p
+        };
+        if !seen_parents.insert(parent.id) {
+            continue;
+        }
         hits.push(Hit {
-            passage_id: id,
+            passage_id: parent.id,
             score,
-            text: p.text,
-            title: p.title,
-            question: p.question,
-            source: p.source,
+            text: parent.text,
+            title: parent.title,
+            question: parent.question,
+            source: parent.source,
         });
+        if hits.len() >= args.top_k {
+            break;
+        }
     }
 
     if args.json {

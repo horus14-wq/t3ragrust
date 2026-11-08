@@ -14,7 +14,9 @@ pub use writer::PassageWriter;
 use serde::{Deserialize, Serialize};
 
 /// Bump on any corpus artifact layout change; readers refuse newer versions.
-pub const FORMAT_VERSION: u32 = 1;
+/// v2: vectors.raw.f32 records carry explicit passage ids (chunking parents
+/// are stored without vectors, so row-index != passage_id).
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Per-corpus metadata persisted as `meta.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
