@@ -6,6 +6,17 @@ cross-encoder rerank, all local ONNX (no API keys).
 
 ## Quickstart
 
+**Install a prebuilt binary** from
+[Releases](https://github.com/horus14-wq/t3ragrust/releases):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/horus14-wq/t3ragrust/main/install.sh | bash
+# T3RAG_EP=cuda|coreml|openvino|directml for flavored builds;
+# T3RAG_VERSION / T3RAG_DIR to pin or relocate.
+```
+
+Then:
+
 ```bash
 # Index a corpus (JSONL / a dir of .md/.txt / parquet)
 t3rag index --input traces.jsonl --name traces
