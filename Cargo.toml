@@ -17,18 +17,18 @@ memmap2 = "0.9"
 rayon = "1"
 rustc-hash = "2"
 dirs = "6"
-tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 hf-hub = { version = "0.4", default-features = false, features = ["ureq"] }
 ort = { version = "2.0.0-rc.10", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
 usearch = "2"
 tantivy = "0.24"
-parquet = { version = "55", features = ["arrow"] }
-arrow = { version = "55", default-features = false }
+parquet = { version = "55", features = ["arrow"], optional = true }
+arrow = { version = "55", default-features = false, optional = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 postcard = { version = "1", features = ["alloc"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
-ureq = { version = "2", default-features = false }
+ureq = { version = "3", default-features = false, features = ["json"] }
 axum = { version = "0.8", features = ["json"] }
 
 # Execution-provider build variants. ort-sys ships ONE binary flavor per
@@ -36,7 +36,8 @@ axum = { version = "0.8", features = ["json"] }
 # `cargo build --features ep-cuda`). With none enabled you get the CPU
 # binary; all `--ep` values other than cpu then error at registration time.
 [features]
-default = []
+default = ["parquet"]
+parquet = ["dep:parquet", "dep:arrow"]
 ep-cuda = ["ort/cuda", "ort/tensorrt"]
 ep-openvino = ["ort/openvino"]
 ep-webgpu = ["ort/webgpu"]

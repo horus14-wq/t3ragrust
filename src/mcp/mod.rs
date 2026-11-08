@@ -147,7 +147,7 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let exec = |a: &Value| -> Result<Value> {
-        let resp = ureq::post(&format!("{base}/search"))
+        let mut resp = ureq::post(&format!("{base}/search"))
             .send_json(json!({
                 "query": a["query"].as_str().unwrap_or(""),
                 "corpus": a["corpus"].as_str(),
@@ -155,10 +155,10 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
                 "rerank": a["rerank"].as_bool().unwrap_or(true),
             }))
             .context("daemon /search")?;
-        if resp.status() != 200 {
-            anyhow::bail!("daemon returned {}", resp.status());
+        if resp.status().as_u16() != 200 {
+            anyhow::bail!("daemon returned {}", resp.status().as_u16());
         }
-        let v: Value = resp.into_json().context("daemon response")?;
+        let v: Value = resp.body_mut().read_json().context("daemon response")?;
         Ok(tool_response(&v))
     };
     for line in stdin.lock().lines() {

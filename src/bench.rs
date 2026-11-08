@@ -92,7 +92,7 @@ fn one_query(
     args: &BenchArgs,
 ) -> Result<(serde_json::Value, f64)> {
     let t = std::time::Instant::now();
-    let resp = ureq::post(&format!("{base}/search"))
+    let mut resp = ureq::post(&format!("{base}/search"))
         .send_json(serde_json::json!({
             "query": query,
             "corpus": corpus,
@@ -104,11 +104,14 @@ fn one_query(
         }))
         .context("daemon POST /search")?;
     let wall_ms = t.elapsed().as_secs_f64() * 1000.0;
-    if resp.status() != 200 {
-        let body: serde_json::Value = resp.into_json().unwrap_or_default();
+    if resp.status().as_u16() != 200 {
+        let body: serde_json::Value = resp.body_mut().read_json().unwrap_or_default();
         anyhow::bail!("daemon query failed: {body}");
     }
-    let v: serde_json::Value = resp.into_json().context("parse daemon response")?;
+    let v: serde_json::Value = resp
+        .body_mut()
+        .read_json()
+        .context("parse daemon response")?;
     let stages = v["stages_ms"].clone();
     if stages.is_null() {
         anyhow::bail!("daemon response missing stages_ms (explain off?)");

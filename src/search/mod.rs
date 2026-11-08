@@ -150,7 +150,7 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
     } else {
         None
     };
-    let resp = ureq::post(&format!("{base}/search"))
+    let mut resp = ureq::post(&format!("{base}/search"))
         .send_json(serde_json::json!({
             "query": args.query,
             "corpus": args.corpus,
@@ -174,10 +174,10 @@ fn thin_search(base: &str, args: &SearchArgs) -> Result<serde_json::Value> {
             "offset": args.offset,
         }))
         .context("daemon POST /search")?;
-    if resp.status() != 200 {
-        anyhow::bail!("daemon returned {}", resp.status());
+    if resp.status().as_u16() != 200 {
+        anyhow::bail!("daemon returned {}", resp.status().as_u16());
     }
-    resp.into_json().context("parse daemon response")
+    resp.body_mut().read_json().context("parse daemon response")
 }
 
 /// Shared renderer for daemon (thin-client) + cold results (t3-css.3.1):

@@ -149,7 +149,7 @@ fn eval_corpus(
 
 /// Query the daemon; return ranked passage ids (top-10 for nDCG@10).
 fn search_ids(base: &str, corpus: &str, query: &str, args: &EvalArgs) -> Result<Vec<u64>> {
-    let resp = ureq::post(&format!("{base}/search"))
+    let mut resp = ureq::post(&format!("{base}/search"))
         .send_json(serde_json::json!({
             "query": query,
             "corpus": corpus,
@@ -159,11 +159,14 @@ fn search_ids(base: &str, corpus: &str, query: &str, args: &EvalArgs) -> Result<
             "preset": if args.fast { Some("fast") } else { None },
         }))
         .context("daemon POST /search")?;
-    if resp.status() != 200 {
-        let body: serde_json::Value = resp.into_json().unwrap_or_default();
+    if resp.status().as_u16() != 200 {
+        let body: serde_json::Value = resp.body_mut().read_json().unwrap_or_default();
         anyhow::bail!("daemon query failed: {body}");
     }
-    let v: serde_json::Value = resp.into_json().context("parse daemon response")?;
+    let v: serde_json::Value = resp
+        .body_mut()
+        .read_json()
+        .context("parse daemon response")?;
     Ok(v["results"]
         .as_array()
         .map(|rs| rs.iter().filter_map(|r| r["passage_id"].as_u64()).collect())

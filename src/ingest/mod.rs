@@ -7,6 +7,7 @@
 
 mod dir;
 mod jsonl;
+#[cfg(feature = "parquet")]
 mod parquet_reader;
 mod stats;
 
@@ -35,6 +36,7 @@ pub struct RawPassage {
 pub enum InputKind {
     Jsonl,
     Directory,
+    #[cfg(feature = "parquet")]
     Parquet,
 }
 
@@ -50,10 +52,20 @@ pub fn open(input: &Path, text_col: Option<&str>) -> Result<(RawIter, InputKind,
         return Ok((it, InputKind::Directory, stats));
     }
     let ext = input.extension().and_then(|e| e.to_str()).unwrap_or("");
+    #[cfg(not(feature = "parquet"))]
+    let _ = text_col;
     match ext.to_ascii_lowercase().as_str() {
         "parquet" => {
-            let (it, stats) = parquet_reader::open(input, text_col)?;
-            Ok((it, InputKind::Parquet, stats))
+            #[cfg(feature = "parquet")]
+            {
+                let (it, stats) = parquet_reader::open(input, text_col)?;
+                Ok((it, InputKind::Parquet, stats))
+            }
+            #[cfg(not(feature = "parquet"))]
+            bail!(
+                ".parquet input but this binary was built without the `parquet` \
+                 feature — rebuild with --features parquet"
+            )
         }
         "jsonl" | "json" | "ndjson" | "" => {
             let (it, stats) = jsonl::open(input)?;
