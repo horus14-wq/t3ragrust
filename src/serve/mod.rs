@@ -189,7 +189,10 @@ pub fn run_serve(args: ServeArgs) -> Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
-    let spec = embed::resolve_model(args.model.as_deref());
+    let mut spec = embed::resolve_model(args.model.as_deref());
+    if let Some(i) = &args.instruction {
+        spec.instruction = i.clone();
+    }
     info!(model = %spec.repo_id, "daemon warmup: loading embedder");
     let embedder = EmbedderPool::load(&spec, args.threads, args.ep, args.pool)?;
     info!(

@@ -34,7 +34,10 @@ pub fn run_index(args: IndexArgs) -> Result<()> {
     let (iter, kind, stats) = ingest::open(&args.input, args.text_col.as_deref())?;
     info!(?kind, input = %args.input.display(), "ingest opened");
 
-    let spec = embed::resolve_model(args.model.as_deref());
+    let mut spec = embed::resolve_model(args.model.as_deref());
+    if let Some(i) = &args.instruction {
+        spec.passage_instruction = i.clone();
+    }
     info!(model = %spec.repo_id, "loading embedder (first run downloads ~1-2GB)");
     let emb = EmbedderPool::load(&spec, args.threads, args.ep, args.pool)?;
     info!(dims = emb.dims(), "embedder ready");

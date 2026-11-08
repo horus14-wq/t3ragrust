@@ -51,6 +51,10 @@ pub struct IndexArgs {
     /// Embedding model override (default: Qwen3-Embedding-0.6B ONNX).
     #[arg(long)]
     pub model: Option<String>,
+    /// Passage instruction prefix override (e5-family `passage: `;
+    /// empty for most models).
+    #[arg(long)]
+    pub instruction: Option<String>,
     /// Vector quantization for the dense index.
     #[arg(long, value_enum, default_value_t = Quantization::I8)]
     pub quantization: Quantization,
@@ -111,6 +115,10 @@ pub struct SearchArgs {
     /// Exact brute-force scan instead of ANN (recall reference).
     #[arg(long)]
     pub exact: bool,
+    /// Query instruction prefix override (models are instruction-tuned;
+    /// the registry default applies when unset).
+    #[arg(long)]
+    pub instruction: Option<String>,
     /// ONNX execution provider (see `t3rag index --ep`).
     #[arg(long, value_enum, default_value_t = Ep::Auto)]
     pub ep: Ep,
@@ -137,6 +145,9 @@ pub struct ServeArgs {
     /// Embedding model override (default: Qwen3-Embedding-0.6B ONNX).
     #[arg(long)]
     pub model: Option<String>,
+    /// Query instruction prefix override (registry default applies when unset).
+    #[arg(long)]
+    pub instruction: Option<String>,
     /// ONNX execution provider (see `t3rag index --ep`).
     #[arg(long, value_enum, default_value_t = Ep::Auto)]
     pub ep: Ep,

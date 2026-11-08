@@ -47,12 +47,17 @@ pub fn rrf_fuse(legs: &[Vec<(u64, f32)>]) -> Vec<(u64, f32)> {
 /// --rerank/--no-rerank, and --candidates always win over the preset.
 fn resolve_preset(args: &SearchArgs) -> (Option<String>, bool, usize) {
     let (model, rerank, cand) = if args.fast {
-        (None, false, 20)
+        (None::<&str>, false, 20)
     } else if args.max {
-        (Some("onnx-community/Qwen3-Embedding-4B-ONNX"), true, 100)
+        // t3-css.1.1: NO quantized >0.6B Qwen3 ONNX exists on HF — every
+        // 4B/8B export is fp32 external-data (~15GB, unusable on CPU), so
+        // --max keeps the corpus's own embedder; its quality dials are
+        // rerank + candidates (a real bigger-model --max awaits a quantized
+        // 4B+ export or the external-data path).
+        (None::<&str>, true, 100)
     } else {
         // --balanced is the default and behaves like "no preset".
-        (None, true, 50)
+        (None::<&str>, true, 50)
     };
     (
         args.model.clone().or_else(|| model.map(String::from)),
@@ -177,10 +182,13 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
     let meta = store::read_meta(&corpus)?;
 
     let (preset_model, rerank, candidates) = resolve_preset(&args);
-    let spec = match preset_model.as_deref() {
+    let mut spec = match preset_model.as_deref() {
         Some(m) => embed::resolve_model(Some(m)),
         None => embed::ModelSpec::for_hf_repo(&meta.model),
     };
+    if let Some(i) = &args.instruction {
+        spec.instruction = i.clone();
+    }
     if spec.repo_id != meta.model {
         anyhow::bail!(
             "preset/--model selects {} but corpus was indexed with {}; \

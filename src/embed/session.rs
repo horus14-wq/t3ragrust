@@ -104,6 +104,11 @@ pub struct Embedder {
     tokenizer: Tokenizer,
     dims: usize,
     instruction: String,
+    passage_instruction: String,
+    /// Input names the export declares (t3-css.1.2) — position_ids/
+    /// attention_mask/token_type_ids are fed only when present; non-Qwen
+    /// exports that omit them no longer crash.
+    declared_inputs: std::collections::HashSet<String>,
     /// `past_key_values.*` input names + declared shapes on merged KV-cache
     /// ONNX exports; fed zero-length cache tensors at run time.
     kv_inputs: Vec<(String, Vec<i64>)>,
@@ -128,6 +133,11 @@ impl Embedder {
         let session = builder
             .commit_from_file(&onnx_path)
             .with_context(|| format!("load ONNX model {}", onnx_path.display()))?;
+        let declared_inputs: std::collections::HashSet<String> = session
+            .inputs()
+            .iter()
+            .map(|o| o.name().to_string())
+            .collect();
         let kv_inputs: Vec<(String, Vec<i64>)> = session
             .inputs()
             .iter()
@@ -173,6 +183,8 @@ impl Embedder {
             tokenizer,
             dims: 0,
             instruction: spec.instruction.clone(),
+            passage_instruction: spec.passage_instruction.clone(),
+            declared_inputs,
             kv_inputs,
         };
         // Probe dims with a trivial forward pass (also serves as warmup).
@@ -199,12 +211,20 @@ impl Embedder {
         Ok(self.forward_batch(&[input])?.remove(0))
     }
 
-    /// Embed a batch of passages (no instruction prefix). Caller batches.
+    /// Embed a batch of passages — the spec's passage prefix applies
+    /// (e5-family `passage: `; empty for most models). Caller batches.
     pub fn embed_passages(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        self.forward_batch(texts)
+        if self.passage_instruction.is_empty() {
+            return self.forward_batch(texts);
+        }
+        let prefixed: Vec<String> = texts
+            .iter()
+            .map(|t| format!("{}{t}", self.passage_instruction))
+            .collect();
+        self.forward_batch(&prefixed)
     }
 
     /// Tokenize+pad a batch, run the ONNX forward pass, last-token-pool each
@@ -235,11 +255,21 @@ impl Embedder {
         let ids_t = Tensor::from_array((shape.clone(), ids)).context("ids tensor")?;
         let mask_t = Tensor::from_array((shape.clone(), mask)).context("mask tensor")?;
         let pos_t = Tensor::from_array((shape, pos)).context("position_ids tensor")?;
-        let mut feeds: Vec<(String, SessionInputValue)> = vec![
-            ("input_ids".into(), ids_t.into()),
-            ("attention_mask".into(), mask_t.into()),
-            ("position_ids".into(), pos_t.into()),
-        ];
+        // Feed only what the export declares (t3-css.1.2): non-Qwen models
+        // omit position_ids/attention_mask; token_type_ids gets zeros.
+        let mut feeds: Vec<(String, SessionInputValue)> = vec![("input_ids".into(), ids_t.into())];
+        if self.declared_inputs.contains("attention_mask") {
+            feeds.push(("attention_mask".into(), mask_t.into()));
+        }
+        if self.declared_inputs.contains("position_ids") {
+            feeds.push(("position_ids".into(), pos_t.into()));
+        }
+        if self.declared_inputs.contains("token_type_ids") {
+            let zeros = vec![0i64; batch * seq];
+            let tt =
+                Tensor::from_array((vec![batch, seq], zeros)).context("token_type_ids tensor")?;
+            feeds.push(("token_type_ids".into(), tt.into()));
+        }
         for (name, dims) in &self.kv_inputs {
             // Keep declared static dims; dynamic dims resolve positionally:
             // dim0 -> batch, everything else -> 0 (empty cache).
@@ -311,19 +341,25 @@ pub(crate) fn fetch_files(spec: &ModelSpec) -> Result<(PathBuf, PathBuf)> {
     for file in &spec.onnx_files {
         match repo.get(file) {
             Ok(p) => {
-                onnx = Some(p);
+                onnx = Some((p, file.clone()));
                 break;
             }
             Err(e) => errs.push(format!("{file}: {e}")),
         }
     }
-    let onnx = onnx.with_context(|| {
+    let (onnx, onnx_file) = onnx.with_context(|| {
         format!(
             "no usable ONNX export in {} (tried: {})",
             spec.repo_id,
             errs.join("; ")
         )
     })?;
+    // External-data exports (fp32/fp16) keep weights in a `<file>_data`
+    // sibling that ORT resolves adjacent to the .onnx — fetch it when the
+    // repo has one (t3-css.1.1; quantized variants are self-contained).
+    if let Err(e) = repo.get(&format!("{onnx_file}_data")) {
+        tracing::debug!(%e, file = %onnx_file, "no external _data sibling (self-contained export)");
+    }
     let tokenizer = repo
         .get(&spec.tokenizer_file)
         .with_context(|| format!("fetch {} from {}", spec.tokenizer_file, spec.repo_id))?;
