@@ -439,6 +439,13 @@ pub struct SkillArgs {
     /// Overwrite an existing SKILL.md.
     #[arg(long)]
     pub force: bool,
+    /// Remove the installed t3rag/ skill dir (requires --yes; prints
+    /// the exact path first — deletion is deliberate).
+    #[arg(long)]
+    pub uninstall: bool,
+    /// Confirm the uninstall.
+    #[arg(long)]
+    pub yes: bool,
 }
 
 /// Agent-specific skills-dir preset for `t3rag skill --agents`.

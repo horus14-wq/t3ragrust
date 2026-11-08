@@ -101,8 +101,25 @@ pub fn run_skill(args: SkillArgs) -> Result<()> {
             return Ok(());
         }
     };
+    if args.uninstall {
+        return uninstall(&target, args.yes);
+    }
     install(&target, args.force)
 }
+
+/// References shipped alongside SKILL.md (t3-css.3.8): the query-craft
+/// lessons from the prototype that make agents retrieve well.
+const QUERY_CRAFT: &str = "# Query craft (prototype lessons)\n\
+- Query for ONE failing symptom/API/constraint — `\"PowerShell ValidateSet + splatting\"`, not `\"build my app\"`. Mega-queries fail; sharp sub-problems retrieve.\n\
+- Mid-project queries (`this error, this API`) outperform greenfield prompts on these corpora.\n\
+- Refine after a miss — a second sharper query beats a bigger first one.\n\
+- Query by intent → corpus: debugging → `*_raw`, planning → `*_struct`/`*_semantic`, `what goes wrong?` → `*_reflect`.\n\
+- When NOT to use: trivial lookups (single fact, single file) — go read the file.\n";
+
+const CORPORA: &str = "# Corpus naming + diversity\n\
+- Per-transform corpora: `fable5_v2_{raw,struct,reflect,semantic}` — search them together with `--corpus all` or a comma list.\n\
+- ≤1 hit per source (`--max-per-source 1`): keeps one episode from dominating the top-k.\n\
+- Keep `question` fields lean in ingested JSONL — preamble-polluted questions poison their retrieval neighborhood.\n";
 
 fn install(dir: &Path, force: bool) -> Result<()> {
     let skill_dir = dir.join("t3rag");
@@ -113,7 +130,29 @@ fn install(dir: &Path, force: bool) -> Result<()> {
         bail!("{} exists — pass --force to overwrite", path.display());
     }
     std::fs::write(&path, SKILL_MD).with_context(|| format!("write {}", path.display()))?;
+    // references/ (t3-css.3.8): query-craft + corpus-strategy notes.
+    let refs = skill_dir.join("references");
+    std::fs::create_dir_all(&refs)?;
+    std::fs::write(refs.join("query-craft.md"), QUERY_CRAFT)?;
+    std::fs::write(refs.join("corpora.md"), CORPORA)?;
     println!("wrote {}", path.display());
+    Ok(())
+}
+
+/// Guardrailed uninstall (t3-css.3.8): removes only `<skills-dir>/t3rag/`,
+/// prints the exact path, requires --yes.
+fn uninstall(dir: &Path, yes: bool) -> Result<()> {
+    let skill_dir = dir.join("t3rag");
+    if !skill_dir.join("SKILL.md").exists() {
+        bail!("no t3rag skill installed under {}", skill_dir.display());
+    }
+    println!("about to remove {}", skill_dir.display());
+    if !yes {
+        bail!("refusing without --yes");
+    }
+    std::fs::remove_dir_all(&skill_dir)
+        .with_context(|| format!("remove {}", skill_dir.display()))?;
+    println!("removed {}", skill_dir.display());
     Ok(())
 }
 
