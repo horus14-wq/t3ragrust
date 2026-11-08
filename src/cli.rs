@@ -46,6 +46,10 @@ impl Cli {
             Command::Log(args) => crate::log::run_log(&args),
             Command::Stats(args) => crate::doctor::run_stats(args.corpus),
             Command::Doctor => crate::doctor::run_doctor(),
+            Command::Verify { corpus } => {
+                print!("{}", crate::verify::verify(corpus)?.render());
+                Ok(())
+            }
             Command::Health => crate::doctor::run_health(),
             Command::Capabilities => crate::capabilities::run_capabilities(),
             Command::Models => crate::capabilities::run_models(),
@@ -87,6 +91,12 @@ pub enum Command {
     Stats(StatsArgs),
     /// Environment sanity: SIMD, EPs, HF cache, corpora, daemon.
     Doctor,
+    /// Corpus integrity: meta/store/vector/BM25 consistency + staleness.
+    Verify {
+        /// Corpus name (default: newest).
+        #[arg(long, env = "T3RAG_CORPUS")]
+        corpus: Option<String>,
+    },
     /// <50ms pre-flight check (agents ping this).
     Health,
     /// Machine-readable CLI surface (commands/flags/endpoints as JSON).

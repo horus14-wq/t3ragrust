@@ -9,7 +9,7 @@ use anyhow::Result;
 
 use crate::index::dense::DenseIndex;
 use crate::paths;
-use crate::store::{self, CorpusMeta};
+use crate::store;
 
 /// One check outcome.
 pub struct Check {
