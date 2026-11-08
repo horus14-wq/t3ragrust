@@ -158,11 +158,36 @@ pub struct McpArgs {
 #[derive(Args)]
 pub struct SkillArgs {
     /// Write SKILL.md into this directory instead of printing.
+    /// Produces `<dir>/t3rag/SKILL.md` (Agent Skills spec layout).
     #[arg(long)]
     pub install: Option<PathBuf>,
+    /// Install into a known agent skills dir (relative to CWD):
+    /// claude -> .claude/skills, devin -> .devin/skills,
+    /// cursor/generic -> .agents/skills.
+    #[arg(long, value_enum)]
+    pub agents: Option<SkillAgents>,
     /// Overwrite an existing SKILL.md.
     #[arg(long)]
     pub force: bool,
+}
+
+/// Agent-specific skills-dir preset for `t3rag skill --agents`.
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+pub enum SkillAgents {
+    Claude,
+    Devin,
+    Cursor,
+    Generic,
+}
+
+impl SkillAgents {
+    pub fn skills_dir(self) -> &'static str {
+        match self {
+            Self::Claude => ".claude/skills",
+            Self::Devin => ".devin/skills",
+            Self::Cursor | Self::Generic => ".agents/skills",
+        }
+    }
 }
 
 /// Whether `t3rag search` uses the resident daemon (t3-css.1.3).

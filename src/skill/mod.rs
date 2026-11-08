@@ -4,14 +4,21 @@
 //! the `search_traces` MCP tool + config snippets, CLI equivalents,
 //! when-to-use guidance); `--install <dir>` writes it into a skills dir.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
 use crate::cli::SkillArgs;
 
 /// The SKILL.md content: self-contained agent-facing description of t3rag.
-const SKILL_MD: &str = r##"# t3rag — thinking-trace retrieval
+/// Frontmatter satisfies the Agent Skills spec (`name` + `description`
+/// are required — without it spec-compliant loaders ignore the file).
+const SKILL_MD: &str = r##"---
+name: t3rag
+description: Retrieve T3 thinking traces — how prior problems were reasoned about — via local hybrid search (dense ANN + BM25 + cross-encoder rerank). Use before tackling non-trivial problems where prior reasoning experience helps.
+---
+
+# t3rag — thinking-trace retrieval
 
 Rust-native RAG over T3 thinking traces. Local ONNX embeddings
 (Qwen3-Embedding-0.6B) + usearch ANN + tantivy BM25 + RRF fusion +
@@ -23,6 +30,16 @@ Use t3rag BEFORE solving a non-trivial problem when prior reasoning
 experience might help: similar bugs, algorithm patterns, debugging
 playbooks, structural approaches. Skip it for trivial lookups — it
 returns *how problems were reasoned about*, not factual docs.
+
+## Query craft (the highest-leverage skill)
+
+Prototype lesson that still holds: **mega-queries fail; sharp
+sub-problems retrieve.** Query for ONE failing symptom, API, or
+constraint — "PowerShell ValidateSet + splatting", not "build my whole
+app". On a miss, refine with a second sharper query. Corpora are named
+per transform — `*_raw` (episode bodies), `*_struct` (cheatsheets),
+`*_reflect` (mistakes), `*_semantic` (insights); mid-debug favors raw,
+planning favors struct/semantic, "what goes wrong" favors reflect.
 
 ## MCP tool
 
@@ -73,19 +90,25 @@ question,source}]}`.
 "##;
 
 /// `t3rag skill` entry point: print or install the SKILL.md wrapper.
+/// Spec layout: `<skills-dir>/t3rag/SKILL.md` (a bare `SKILL.md` in the
+/// skills root is ignored by spec-compliant loaders).
 pub fn run_skill(args: SkillArgs) -> Result<()> {
-    match args.install {
-        None => {
+    let target = match (args.install.as_ref(), args.agents) {
+        (Some(dir), _) => dir.clone(),
+        (None, Some(agents)) => PathBuf::from(agents.skills_dir()),
+        (None, None) => {
             print!("{SKILL_MD}");
-            Ok(())
+            return Ok(());
         }
-        Some(dir) => install(&dir, args.force),
-    }
+    };
+    install(&target, args.force)
 }
 
-fn install(dir: &PathBuf, force: bool) -> Result<()> {
-    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    let path = dir.join("SKILL.md");
+fn install(dir: &Path, force: bool) -> Result<()> {
+    let skill_dir = dir.join("t3rag");
+    std::fs::create_dir_all(&skill_dir)
+        .with_context(|| format!("create {}", skill_dir.display()))?;
+    let path = skill_dir.join("SKILL.md");
     if path.exists() && !force {
         bail!("{} exists — pass --force to overwrite", path.display());
     }
