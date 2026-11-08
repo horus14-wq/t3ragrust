@@ -300,14 +300,26 @@ async fn search(
     Json(req): Json<SearchRequest>,
 ) -> impl IntoResponse {
     st.touch();
-    match do_search(&st, &req) {
-        Ok(resp) => Json(resp).into_response(),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("{e:#}")})),
-        )
-            .into_response(),
+    // do_search is synchronous ORT/index work — it must not run on a tokio
+    // worker (blocks the reactor AND ORT intra-op scheduling can stall on
+    // worker threads). spawn_blocking is the correct pool for it.
+    match tokio::task::spawn_blocking(move || {
+        do_search(&st, &req).and_then(|r| serde_json::to_value(&r).context("serialize"))
+    })
+    .await
+    {
+        Ok(Ok(resp)) => Json(resp).into_response(),
+        Ok(Err(e)) => err_response(format!("{e:#}")),
+        Err(e) => err_response(format!("search task aborted: {e}")),
     }
+}
+
+fn err_response(msg: String) -> axum::response::Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({"error": msg})),
+    )
+        .into_response()
 }
 
 /// Shared query path: embed -> ANN + BM25 -> RRF -> optional rerank ->
@@ -324,13 +336,18 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         }
     }
     let (name, corpus) = st.corpus(req.corpus.as_deref())?;
+    tracing::debug!(corpus = %name, "stage: corpus ready");
     let top_k = req.top_k.unwrap_or(3);
     let cand = req.candidates.unwrap_or(50);
 
-    let qvec = match st.query_cache.lock().unwrap().get(&req.query) {
+    let cached = st.query_cache.lock().unwrap().get(&req.query);
+    let qvec = match cached {
         Some(v) => v,
         None => {
-            let v = st.embedder.embed_query(&req.query)?;
+            let v = {
+                tracing::debug!("stage: embed start");
+                st.embedder.embed_query(&req.query)?
+            };
             st.query_cache
                 .lock()
                 .unwrap()
@@ -338,9 +355,11 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             v
         }
     };
+    tracing::debug!("stage: embed done");
     let ann = corpus.dense.search(&qvec, cand)?;
     let bm = corpus.lex.search(&req.query, cand).unwrap_or_default();
     let mut ranked = rrf_fuse(&[ann, bm]);
+    tracing::debug!("stage: fused");
 
     if req.rerank.unwrap_or(true) {
         let cand_rows: Vec<(u64, f32)> = ranked.drain(..).take(cand).collect();
@@ -407,21 +426,27 @@ async fn mcp_http(
     Json(msg): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     st.touch();
-    let exec = |args: &serde_json::Value| -> Result<serde_json::Value> {
-        let req = SearchRequest {
-            query: args["query"].as_str().unwrap_or("").to_string(),
-            corpus: args["corpus"].as_str().map(String::from),
-            top_k: args["top_k"].as_u64().map(|v| v as usize),
-            candidates: args["candidates"].as_u64().map(|v| v as usize),
-            rerank: args["rerank"].as_bool(),
-            model: args["model"].as_str().map(String::from),
+    let msg2 = msg.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let exec = |args: &serde_json::Value| -> Result<serde_json::Value> {
+            let req = SearchRequest {
+                query: args["query"].as_str().unwrap_or("").to_string(),
+                corpus: args["corpus"].as_str().map(String::from),
+                top_k: args["top_k"].as_u64().map(|v| v as usize),
+                candidates: args["candidates"].as_u64().map(|v| v as usize),
+                rerank: args["rerank"].as_bool(),
+                model: args["model"].as_str().map(String::from),
+            };
+            let resp = do_search(&st, &req)?;
+            Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))
         };
-        let resp = do_search(&st, &req)?;
-        Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))
-    };
-    match crate::mcp::handle_rpc(&msg, &exec) {
-        Some(resp) => Json(resp).into_response(),
-        None => StatusCode::ACCEPTED.into_response(),
+        crate::mcp::handle_rpc(&msg2, &exec)
+    })
+    .await;
+    match result {
+        Ok(Some(resp)) => Json(resp).into_response(),
+        Ok(None) => StatusCode::ACCEPTED.into_response(),
+        Err(e) => err_response(format!("mcp task aborted: {e}")),
     }
 }
 
