@@ -140,6 +140,9 @@ struct SearchRequest {
     /// Extra query phrasings (t3-css.4.4): each is embedded + ranked,
     /// all rankings fused into one RRF merge.
     queries: Option<Vec<String>>,
+    /// Passage ids to subtract from results (t3-b68) — applied before
+    /// top_k slicing so the list still fills.
+    exclude: Option<Vec<u64>>,
     filter: Option<Vec<String>>,
     max_per_source: Option<usize>,
     max_chars: Option<usize>,
@@ -176,6 +179,20 @@ struct StageMs {
     hydrate_ms: f64,
 }
 
+/// Always-on provenance block (t3-ny0): the agent shouldn't need a
+/// second call to know what answered the query or whether to trust it.
+#[derive(Serialize)]
+struct RespMeta<'a> {
+    corpora: Vec<String>,
+    model: String,
+    dims: u32,
+    quantization: String,
+    preset: Option<&'a str>,
+    took_ms: f64,
+    /// Hours since the oldest queried corpus was built (`created_at`).
+    index_age_h: Option<f64>,
+}
+
 #[derive(Serialize)]
 struct SearchResponse<'a> {
     query: &'a str,
@@ -184,6 +201,9 @@ struct SearchResponse<'a> {
     score_kind: &'static str,
     results: Vec<HitOut>,
     stages_ms: Option<StageMs>,
+    /// Honesty surface: truncation, staleness, missing legs, fallbacks.
+    warnings: Vec<String>,
+    meta: RespMeta<'a>,
 }
 
 impl DaemonState {
@@ -541,6 +561,9 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         fused: Vec<(u64, f32)>,
     }
     let mut per_corpus: Vec<CorpusLegs> = Vec::new();
+    // t3-ny0: warn when --sparse was requested but no queried corpus
+    // contributed a sparse leg (feature off or sparse.bin absent).
+    let mut sparse_missing = req.sparse == Some(true);
     for (ci, (_name, corpus)) in corpora.iter().enumerate() {
         // Multi-query (t3-css.4.4): every query phrasing contributes its
         // own legs; they're all fused into one ranking below.
@@ -609,6 +632,7 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         if !sparse_leg.is_empty() {
             all_legs.push(sparse_leg);
             all_weights.push(1.0);
+            sparse_missing = false;
         }
         let fused = rrf_fuse(
             &all_legs,
@@ -628,6 +652,7 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         .flat_map(|c| c.fused.iter().map(move |(id, s)| (c.ci, *id, *s)))
         .collect();
     ranked.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    let ranked_total = ranked.len();
     tracing::debug!(corpora = corpora.len(), "stage: fused");
 
     let mut score_kind = "rrf";
@@ -695,9 +720,13 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         })
         .collect();
     let max_ps = req.max_per_source.unwrap_or(usize::MAX);
+    // --exclude (t3-b68): parent passage ids subtracted post-fusion,
+    // before top_k slicing — iterative refinement never re-shows a hit.
+    let exclude: rustc_hash::FxHashSet<u64> = req.exclude.iter().flatten().copied().collect();
     let mut per_source: rustc_hash::FxHashMap<String, usize> = Default::default();
     let mut seen = std::collections::HashSet::new();
     let mut results = Vec::new();
+    let mut text_truncated = false;
     for (ci, id, score) in ranked.into_iter().skip(req.offset.unwrap_or(0)) {
         if let Some(ms) = req.min_score {
             if score < ms {
@@ -711,6 +740,9 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         } else {
             p
         };
+        if exclude.contains(&parent.id) {
+            continue;
+        }
         if !seen.insert(parent.id) {
             continue;
         }
@@ -741,7 +773,10 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             .unwrap() += 1;
         // Explain mode (t3-css.2.1): per-leg scores by *chunk* id.
         let text = match req.max_chars {
-            Some(mc) if parent.text.len() > mc => parent.text.chars().take(mc).collect(),
+            Some(mc) if parent.text.len() > mc => {
+                text_truncated = true;
+                parent.text.chars().take(mc).collect()
+            }
             _ => parent.text,
         };
         results.push(HitOut {
@@ -789,6 +824,44 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         took_ms: t0.elapsed().as_secs_f64() * 1000.0,
         preset: req.preset.as_deref(),
     });
+    // t3-ny0: warnings + always-on meta block.
+    let mut warnings = Vec::new();
+    if results.len() == top_k && ranked_total.saturating_sub(req.offset.unwrap_or(0)) > top_k {
+        warnings.push(format!(
+            "results_truncated: {} of {} ranked hits returned (raise top_k or use --offset)",
+            results.len(),
+            ranked_total
+        ));
+    }
+    if sparse_missing {
+        warnings.push("sparse_leg_missing: --sparse requested but no corpus has sparse.bin (or built without the sparse feature)".into());
+    }
+    if text_truncated {
+        warnings.push("passage_text_truncated: --max-chars applied".into());
+    }
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let index_age_h = corpora
+        .iter()
+        .filter_map(|(_, c)| {
+            c.meta
+                .created_at
+                .as_deref()
+                .and_then(|s| s.parse::<u64>().ok())
+                .map(|ts| now_s.saturating_sub(ts) as f64 / 3600.0)
+        })
+        .fold(None, |acc: Option<f64>, h| {
+            Some(acc.map_or(h, |a| a.max(h)))
+        });
+    if index_age_h.is_some_and(|h| h > 168.0) {
+        warnings.push(format!(
+            "stale_corpus: oldest queried index is {:.0}h old",
+            index_age_h.unwrap_or(0.0)
+        ));
+    }
+    let first = corpora.first().map(|(_, c)| c);
     Ok(SearchResponse {
         query: &req.query,
         corpus: corpora
@@ -799,6 +872,16 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         score_kind,
         results,
         stages_ms,
+        warnings,
+        meta: RespMeta {
+            corpora: corpora.iter().map(|(n, _)| n.clone()).collect(),
+            model: first.map_or(String::new(), |c| c.meta.model.clone()),
+            dims: first.map_or(0, |c| c.meta.dims),
+            quantization: first.map_or(String::new(), |c| c.meta.quantization.clone()),
+            preset: req.preset.as_deref(),
+            took_ms: t0.elapsed().as_secs_f64() * 1000.0,
+            index_age_h,
+        },
     })
 }
 
@@ -907,6 +990,9 @@ async fn mcp_http(
                         .filter_map(|v| v.as_str().map(String::from))
                         .collect()
                 }),
+                exclude: args["exclude"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_u64()).collect()),
             };
             let resp = do_search(&st, &req)?;
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))
