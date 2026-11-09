@@ -372,6 +372,29 @@ async fn serve(args: ServeArgs) -> Result<()> {
             tracing::warn!(corpus = %name, "preload failed: {e:#}");
         }
     }
+    // --preload-reranker (GH#4.7): warm the default pool now instead of
+    // charging the first rerank query the HF download + session build.
+    if args.preload_reranker {
+        match rerank::spec(&args.reranker).and_then(|s| {
+            RerankerPool::load(
+                &s,
+                state.threads,
+                state.ep,
+                state.rerank_sessions,
+                state.rerank_max_tokens,
+            )
+        }) {
+            Ok(p) => {
+                state
+                    .rerankers
+                    .lock()
+                    .unwrap()
+                    .insert(args.reranker.clone(), Arc::new(p));
+                tracing::info!(reranker = %args.reranker, "reranker preloaded");
+            }
+            Err(e) => tracing::warn!(reranker = %args.reranker, "reranker preload failed: {e:#}"),
+        }
+    }
 
     // Bearer-token middleware when --token is set (t3-css.3.7): /health
     // stays open for liveness; /search and /mcp require the token.
@@ -843,7 +866,11 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
         let mut ids = Vec::with_capacity(cand_rows.len());
         for (ci, id, _) in &cand_rows {
             let p = corpora[*ci].1.reader.get(*id)?;
-            pairs.push((req.query.clone(), p.text));
+            // Pre-slice (GH#4.6): the tokenizer truncates to
+            // rerank_max_tokens anyway — don't clone/tokenize full
+            // multi-KB traces. 4 chars/token slack keeps the 512 cap.
+            let text: String = p.text.chars().take(2048).collect();
+            pairs.push((req.query.clone(), text));
             ids.push((*ci, *id));
         }
         // Lazy per-name reranker pools; a load failure degrades to the

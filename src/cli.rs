@@ -438,6 +438,10 @@ pub struct ServeArgs {
     /// GPU EPs overlap forward passes; 1 keeps memory lowest.
     #[arg(long, default_value_t = 1, env = "T3RAG_RERANK_SESSIONS")]
     pub rerank_sessions: usize,
+    /// Load the default reranker pool at startup (otherwise the first
+    /// rerank query pays the HF download + session build cliff).
+    #[arg(long, env = "T3RAG_PRELOAD_RERANKER")]
+    pub preload_reranker: bool,
     /// ONNX execution provider (see `t3rag index --ep`).
     #[arg(long, value_enum, default_value_t = Ep::Auto, env = "T3RAG_EP")]
     pub ep: Ep,

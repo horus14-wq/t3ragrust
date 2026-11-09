@@ -467,7 +467,10 @@ fn run_cold_search(args: SearchArgs) -> Result<()> {
         let mut ids = Vec::with_capacity(cand.len());
         for (id, _) in &cand {
             let p = reader.get(*id)?;
-            pairs.push((args.query.clone(), p.text));
+            // Same pre-slice as the daemon path (GH#4.6): the pair
+            // tokenizer truncates to rerank_tokens anyway.
+            let text: String = p.text.chars().take(2048).collect();
+            pairs.push((args.query.clone(), text));
             ids.push(*id);
         }
         let scores = pool.score_pairs(&pairs)?;
