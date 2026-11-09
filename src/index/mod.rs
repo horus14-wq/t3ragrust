@@ -487,7 +487,23 @@ mod rewrite_tests {
             dir.with_file_name(format!("{}.rw", dir.file_name().unwrap().to_string_lossy()));
         let _ = std::fs::remove_dir_all(&stage);
         let rd = crate::store::PassageReader::open(&dir).unwrap();
+        // raw.f32 layout: [u64 n][u64 dims] then n × {u64 id | f32×dims}
+        // — v2 carries its own passage id per record; map id → vector.
         let raw = std::fs::read(dir.join("vectors.raw.f32")).unwrap();
+        let (nvec, stride, _has_id) = crate::index::dense::raw_layout(&raw, 1024).unwrap();
+        let mut vecs: std::collections::HashMap<u64, Vec<f32>> =
+            std::collections::HashMap::with_capacity(nvec);
+        for i in 0..nvec {
+            let rec = &raw[16 + i * stride..16 + (i + 1) * stride];
+            let rid = u64::from_le_bytes(rec[0..8].try_into().unwrap());
+            vecs.insert(
+                rid,
+                rec[8..]
+                    .chunks_exact(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect(),
+            );
+        }
         let mut wr = crate::store::PassageWriter::create(&stage).unwrap();
         let mut bm = crate::index::Bm25Builder::create(&stage, 256, 0).unwrap();
         let mut dense = crate::index::DenseBuilder::create(
@@ -500,35 +516,54 @@ mod rewrite_tests {
         )
         .unwrap();
         let mut acc = crate::manifest::ManifestAcc::new(1024);
+        // Parent-level dedupe: stored passages are parents (hydration,
+        // no vector) interleaved with their chunks (vector). raw.f32 is
+        // positional by EMBED order, not passage id — so track a
+        // separate embed ordinal. A dropped parent drops its chunks.
+        // Pre-scan: hydration parents are records that have children —
+        // a chunk record points at them via parent_id != own id.
+        let mut has_children = std::collections::HashSet::new();
+        for id in 0..rd.len() {
+            let p = rd.get(id).unwrap();
+            if p.parent_id != id {
+                has_children.insert(p.parent_id);
+            }
+        }
         let mut seen = std::collections::HashMap::new();
         let mut id_map = std::collections::HashMap::new();
+        let mut drop_parents = std::collections::HashSet::new();
         let (mut kept, mut dropped) = (0u64, 0u64);
         for id in 0..rd.len() {
             let mut p = rd.get(id).unwrap();
-            let h = crate::ingest::hash_text(&p.text);
-            if let Some(&twin) = seen.get(&h) {
-                id_map.insert(id, twin);
+            // Hydration parent = parent_id==id && chunk_idx==0 && has
+            // chunk children (vectorless, BM25-less — mirror the
+            // original index, which stores them only for hydration).
+            let is_parent = p.parent_id == id && p.chunk_idx == 0 && has_children.contains(&id);
+            if is_parent {
+                let h = crate::ingest::hash_text(&p.text);
+                if let Some(&twin) = seen.get(&h) {
+                    id_map.insert(id, twin);
+                    drop_parents.insert(id);
+                    dropped += 1;
+                    continue;
+                }
+                seen.insert(h, kept);
+            } else if drop_parents.contains(&p.parent_id) {
                 dropped += 1;
                 continue;
             }
-            let v: Vec<f32> = raw[id as usize * 4096..(id as usize + 1) * 4096]
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
-                .collect();
-            seen.insert(h, kept);
             id_map.insert(id, kept);
-            // Chunk records hydrate through parent_id — remap through
-            // the id translation (parents precede their chunks; a
-            // dropped parent's children adopt the kept twin).
             if p.parent_id != id {
                 p.parent_id = *id_map.get(&p.parent_id).unwrap_or(&kept);
             }
+            if let Some(v) = vecs.get(&id) {
+                dense.add(kept, v).unwrap();
+                acc.observe_vector(v);
+                bm.add(&p).unwrap();
+            }
             p.id = kept;
-            dense.add(kept, &v).unwrap();
             wr.push(&p).unwrap();
-            bm.add(&p).unwrap();
             acc.observe(&p);
-            acc.observe_vector(&v);
             kept += 1;
         }
         wr.finish().unwrap();
