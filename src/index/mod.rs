@@ -413,6 +413,63 @@ fn flush_batch(
     Ok(())
 }
 
+#[cfg(test)]
+mod rewrite_tests {
+    /// Surgical `question → null` rewrite for MISSING ITEMS catalog
+    /// specs (GH#5 data fix — the strip pass missed this shape). Keeps
+    /// ids/positions/vectors byte-identical; rebuilds only passages,
+    /// bm25 and the manifest — no chunking, no embedding, no HNSW.
+    /// Run: `CORPUS_DIR=~/.cache/t3rag/corpora/raw-chunked cargo test
+    ///   --release rewrite_missing_items -- --ignored --nocapture`
+    #[test]
+    #[ignore = "one-off data rewrite — run manually with CORPUS_DIR"]
+    fn rewrite_missing_items_questions() {
+        use std::path::PathBuf;
+        let dir = PathBuf::from(std::env::var("CORPUS_DIR").expect("CORPUS_DIR"));
+        let stage = dir.with_file_name(format!(
+            "{}.rw",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&stage);
+        let rd = crate::store::PassageReader::open(&dir).unwrap();
+        let mut wr = crate::store::PassageWriter::create(&stage).unwrap();
+        let mut bm = crate::index::Bm25Builder::create(&stage, 256, 0).unwrap();
+        let mut acc = crate::manifest::ManifestAcc::new(1024);
+        let mut nulled = 0u64;
+        for id in 0..rd.len() {
+            let mut p = rd.get(id).unwrap();
+            if p.question
+                .as_deref()
+                .is_some_and(|q| q.starts_with("MISSING ITEMS"))
+            {
+                p.question = None;
+                nulled += 1;
+            }
+            wr.push(&p).unwrap();
+            bm.add(&p).unwrap();
+            acc.observe(&p);
+        }
+        wr.finish().unwrap();
+        bm.commit().unwrap();
+        // Centroid + vector stats come from the untouched raw vectors.
+        let raw = std::fs::read(dir.join("vectors.raw.f32")).unwrap();
+        for v in raw.chunks_exact(4 * 1024) {
+            let f: Vec<f32> = v
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            acc.observe_vector(&f);
+        }
+        let mut meta = crate::store::read_meta(&dir).unwrap();
+        meta.manifest = Some(acc.finish());
+        crate::store::write_meta(&stage, &meta).unwrap();
+        for f in ["vectors.usearch", "vectors.raw.f32"] {
+            std::fs::copy(dir.join(f), stage.join(f)).unwrap();
+        }
+        eprintln!("rewrote {nulled}/{} questions → {}", rd.len(), stage.display());
+    }
+}
+
 /// Unix-seconds timestamp for build-dir rotation suffixes.
 fn now_ts() -> u64 {
     std::time::SystemTime::now()
