@@ -29,6 +29,12 @@ use crate::embed::ModelSpec;
 /// speed/quality sweet spot for final top-few rescoring.
 pub const RERANK_MAX_TOKENS: usize = 512;
 
+/// Micro-batch size for the cross-encoder forward. A single fat batch
+/// pads every pair to the batch max (~512) and pays quadratic attention
+/// on mostly-pad tokens; sorting by length and scoring ~8 at a time
+/// keeps each forward's seq close to its own max (GH#4/5 §5.5).
+const RERANK_MICRO_BATCH: usize = 8;
+
 /// Default reranker model: BGE-v2-m3 ONNX (multilingual, strong
 /// cross-encoder; ~1.2s/pair on CPU — the `balanced` preset swaps to
 /// minilm for latency).
@@ -171,6 +177,26 @@ impl Reranker {
             .tokenizer
             .encode_batch(inputs, true)
             .map_err(|e| anyhow::anyhow!("tokenize pairs: {e}"))?;
+        // Micro-batch by encoded length (GH#4/5): one fat batch pads
+        // every pair to the LONGEST encoding and pays seq² attention on
+        // mostly-pad tokens. Sorting lets each forward pad only to its
+        // own group's max — large win when pair lengths vary.
+        let mut order: Vec<usize> = (0..encodings.len()).collect();
+        order.sort_by_key(|&i| encodings[i].get_ids().len());
+        let mut scores = vec![0f32; encodings.len()];
+        for group in order.chunks(RERANK_MICRO_BATCH) {
+            let encs: Vec<&tokenizers::Encoding> = group.iter().map(|&i| &encodings[i]).collect();
+            let s = self.forward_batch(&encs)?;
+            for (i, &idx) in group.iter().enumerate() {
+                scores[idx] = s[i];
+            }
+        }
+        Ok(scores)
+    }
+
+    /// One ORT forward over a slice of pre-encoded pairs. Callers batch
+    /// by similar length so padding waste is minimal.
+    fn forward_batch(&mut self, encodings: &[&tokenizers::Encoding]) -> Result<Vec<f32>> {
         let batch = encodings.len();
         let seq = encodings
             .iter()
@@ -180,7 +206,7 @@ impl Reranker {
         let mut ids = Vec::with_capacity(batch * seq);
         let mut mask = Vec::with_capacity(batch * seq);
         let mut type_ids = Vec::with_capacity(batch * seq);
-        for enc in &encodings {
+        for enc in encodings {
             ids.extend(enc.get_ids().iter().map(|&t| t as i64));
             mask.extend(enc.get_attention_mask().iter().map(|&t| t as i64));
             type_ids.extend(enc.get_type_ids().iter().map(|&t| t as i64));

@@ -413,6 +413,14 @@ fn flush_batch(
     Ok(())
 }
 
+/// Unix-seconds timestamp for build-dir rotation suffixes.
+fn now_ts() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod rewrite_tests {
     /// Surgical `question → null` rewrite for MISSING ITEMS catalog
@@ -450,11 +458,17 @@ mod rewrite_tests {
         wr.finish().unwrap();
         bm.commit().unwrap();
         // Centroid + vector stats come from the untouched raw vectors.
+        // v2 records carry an 8-byte id before each vector (raw_layout).
         let raw = std::fs::read(dir.join("vectors.raw.f32")).unwrap();
-        for v in raw.chunks_exact(4 * 1024) {
-            let f: Vec<f32> = v
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+        let (nvec, stride, has_id) = crate::index::dense::raw_layout(&raw, 1024).unwrap();
+        let off = if has_id { 8 } else { 0 };
+        for i in 0..nvec {
+            let rec = &raw[16 + i * stride..];
+            let f: Vec<f32> = rec[off..off + 4096]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
                 .collect();
             acc.observe_vector(&f);
         }
@@ -499,8 +513,10 @@ mod rewrite_tests {
             vecs.insert(
                 rid,
                 rec[8..]
-                    .chunks_exact(4)
-                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|b| f32::from_le_bytes(*b))
                     .collect(),
             );
         }
@@ -579,12 +595,4 @@ mod rewrite_tests {
             stage.display()
         );
     }
-}
-
-/// Unix-seconds timestamp for build-dir rotation suffixes.
-fn now_ts() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }
