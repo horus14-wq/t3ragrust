@@ -29,7 +29,13 @@ try {
     $zip = Join-Path $tmp "$name.zip"
     Write-Host "downloading $base/$name.zip"
     Invoke-WebRequest -UseBasicParsing "$base/$name.zip" -OutFile $zip
-    $want = ((Invoke-WebRequest -UseBasicParsing "$base/$name.zip.sha256").Content -split '\s+')[0].ToLower()
+    # GH#6: .Content can arrive as [byte[]] for these assets — decode to
+    # UTF-8 first, then take the 64-hex digest rather than a token split
+    # (byte[0] of a hash starting 'e' is ASCII 101 → bogus "want 101").
+    $raw = (Invoke-WebRequest -UseBasicParsing "$base/$name.zip.sha256").Content
+    if ($raw -is [byte[]]) { $raw = [Text.Encoding]::UTF8.GetString($raw) }
+    $want = ([regex]::Match(($raw -as [string]).Trim(), '[A-Fa-f0-9]{64}')).Value.ToLower()
+    if (-not $want) { throw "could not parse sha256 artifact" }
     $got  = (Get-FileHash -Algorithm SHA256 $zip).Hash.ToLower()
     if ($want -ne $got) { throw "checksum mismatch (want $want, got $got)" }
 

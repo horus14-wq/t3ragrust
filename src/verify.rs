@@ -168,6 +168,39 @@ pub fn verify_dir(name: &str, dir: &Path) -> VerifyReport {
                             "n={n} dims={dims} size={actual} layout={layout} (v1={v1} v2={v2})"
                         ),
                     });
+                    // v2 records carry their passage id — check every
+                    // embedded id is < doc_count (GH#7: id-bounds check
+                    // that would catch a mismatched generation). Cheap:
+                    // reads only the 8-byte id field per record.
+                    if layout == "v2" {
+                        use std::io::{Read, Seek, SeekFrom};
+                        let mut f2 = std::fs::File::open(&raw_path).unwrap();
+                        let mut bad = 0u64;
+                        let mut buf = [0u8; 8];
+                        let stride = 8 + dims * 4;
+                        for i in 0..n.min(1_000_000) {
+                            if f2
+                                .seek(SeekFrom::Start(16 + i * stride))
+                                .and_then(|_| f2.read_exact(&mut buf))
+                                .is_err()
+                            {
+                                bad += 1;
+                                break;
+                            }
+                            if u64::from_le_bytes(buf) >= meta.doc_count {
+                                bad += 1;
+                            }
+                        }
+                        checks.push(Check {
+                            name: "raw ids",
+                            ok: bad == 0,
+                            detail: if bad == 0 {
+                                format!("{n} embedded ids in-bounds")
+                            } else {
+                                format!("{bad} ids >= doc_count {}", meta.doc_count)
+                            },
+                        });
+                    }
                 }
                 Err(e) => checks.push(Check {
                     name: "vectors.raw.f32",
@@ -183,7 +216,10 @@ pub fn verify_dir(name: &str, dir: &Path) -> VerifyReport {
         }),
     }
 
-    // BM25 leg: index dir exists and is non-empty.
+    // BM25 leg: index dir exists, is non-empty, AND returns in-bounds
+    // ids — mixed-generation tantivy segments can serve passage ids
+    // above meta.doc_count (GH#7: stale segments left by non-atomic
+    // remote uploads made /search 500 with out-of-range ids).
     let bm = dir.join("bm25");
     let bm_ok = bm.is_dir()
         && std::fs::read_dir(&bm)
@@ -198,6 +234,31 @@ pub fn verify_dir(name: &str, dir: &Path) -> VerifyReport {
             format!("{} missing or empty", bm.display())
         },
     });
+    if bm_ok {
+        match crate::index::Bm25Index::open(dir).and_then(|idx| idx.search("the", 8)) {
+            Ok(hits) => {
+                let bad = hits.iter().filter(|(id, _)| *id >= meta.doc_count).count();
+                checks.push(Check {
+                    name: "bm25 ids",
+                    ok: bad == 0,
+                    detail: if bad == 0 {
+                        format!("{} probe hits in-bounds", hits.len())
+                    } else {
+                        format!(
+                            "{bad}/{} hits >= doc_count {} (stale segments?)",
+                            hits.len(),
+                            meta.doc_count
+                        )
+                    },
+                });
+            }
+            Err(e) => checks.push(Check {
+                name: "bm25 ids",
+                ok: false,
+                detail: format!("open/search failed: {e}"),
+            }),
+        }
+    }
 
     // Staleness: input newer than index → warning (not a hard fail).
     if let Some(note) = crate::doctor::staleness_note(&meta, dir) {
