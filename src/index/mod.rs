@@ -595,4 +595,46 @@ mod rewrite_tests {
             stage.display()
         );
     }
+
+    /// BM25-only rebuild for raw-chunked (GH#8): the dedupe indexed
+    /// `p.id` BEFORE renumbering, so BM25 carries old ids. Passages/
+    /// vectors are already correct — this just re-indexes docs that
+    /// have a vector (hydration parents have none, by design) into a
+    /// clean bm25 dir. Swap `bm25/` afterward; ~2 min, no GPU.
+    #[test]
+    #[ignore = "one-off bm25 repair — run manually with CORPUS_DIR"]
+    fn rebuild_bm25_only() {
+        use std::path::PathBuf;
+        let dir = PathBuf::from(std::env::var("CORPUS_DIR").expect("CORPUS_DIR"));
+        let stage = dir.with_file_name(format!(
+            "{}.bm25fix",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        let _ = std::fs::remove_dir_all(&stage);
+        let rd = crate::store::PassageReader::open(&dir).unwrap();
+        // Embedded ids live in raw.f32 v2 records — the same set that
+        // got bm25 docs in the original build.
+        let raw = std::fs::read(dir.join("vectors.raw.f32")).unwrap();
+        let (nvec, stride, has_id) = crate::index::dense::raw_layout(&raw, 1024).unwrap();
+        let mut embedded = std::collections::HashSet::with_capacity(nvec);
+        for i in 0..nvec {
+            let rec = &raw[16 + i * stride..];
+            embedded.insert(u64::from_le_bytes(rec[0..8].try_into().unwrap()));
+        }
+        let mut bm = crate::index::Bm25Builder::create(&stage, 256, 0).unwrap();
+        let mut indexed = 0u64;
+        for id in 0..rd.len() {
+            let p = rd.get(id).unwrap();
+            if embedded.contains(&id) {
+                bm.add(&p).unwrap();
+                indexed += 1;
+            }
+        }
+        bm.commit().unwrap();
+        eprintln!(
+            "bm25 rebuilt: {indexed}/{} docs → {}",
+            rd.len(),
+            stage.display()
+        );
+    }
 }
