@@ -76,6 +76,13 @@ background on first tool call.
 - **Rerank**: optional cross-encoder, **off by default** (~seconds–minute
   per query on CPU). Enable per-query with `--rerank`, or via the
   `--balanced`/`--max` presets; `--reranker minilm|bge-base|bge-m3`.
+  On NVIDIA boxes prefer `--ep cuda` — DirectML runs the forward but
+  measured ~3–5 s/pair vs the ~1.2 s CPU estimate (soft DML load, high
+  util / low watts). `minilm` is ~15–20× faster than `bge-m3` but a
+  weaker ranker; `bge-base` is the middle ground. `serve` takes
+  `--rerank-sessions N` to shard pairs across N loaded sessions (GPU
+  overlap; each adds model-size memory) and `--rerank-tokens` (512
+  default; 256 is a cheap speedup).
 - **Daemon**: per-user, `~/.cache/t3rag/daemon.json` for discovery;
   HTTP + streamable-HTTP MCP; `--token`/`--bind`/`--max-body` hardening.
 

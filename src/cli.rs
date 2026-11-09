@@ -434,6 +434,10 @@ pub struct ServeArgs {
     /// Reranker pair truncation cap (default 512).
     #[arg(long, default_value_t = 512)]
     pub rerank_tokens: usize,
+    /// Reranker sessions per pool (pairs shard across them). >1 lets
+    /// GPU EPs overlap forward passes; 1 keeps memory lowest.
+    #[arg(long, default_value_t = 1, env = "T3RAG_RERANK_SESSIONS")]
+    pub rerank_sessions: usize,
     /// ONNX execution provider (see `t3rag index --ep`).
     #[arg(long, value_enum, default_value_t = Ep::Auto, env = "T3RAG_EP")]
     pub ep: Ep,

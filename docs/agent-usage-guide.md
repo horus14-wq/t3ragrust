@@ -218,6 +218,13 @@ can destroy indexes.
   ~1–2 s/query over 50 candidates on an idle CPU, and ~80 s+ measured on a
   box at load-average 16. Enable with `--rerank` or the `--balanced`/`--max`
   presets; `--rerank-candidates` trims the pool it scores.
+  **EP note:** on NVIDIA, run the daemon with `--ep cuda` — DirectML
+  executes the cross-encoder but measured ~3–5 s/pair (slower than CPU;
+  GPU "busy" at low watts — soft DML scheduling). **Model note:**
+  `minilm` is ~15–20× faster than `bge-m3` but is a 22M-param web-QA
+  ranker — expect weaker ordering on T3 traces; `bge-base` is the sane
+  middle. Daemon knobs: `--rerank-sessions N` (shard candidate pairs
+  across N sessions; memory ×N), `--rerank-tokens` (512 → 256 saves ~2×).
 - **Indexing** is offline-scale: a 25-doc index ≈ 4 min (mostly model
   load); a 500-doc slice ≈ 38 min. Queries are the cheap part by design.
 

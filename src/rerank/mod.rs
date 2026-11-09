@@ -29,8 +29,6 @@ use crate::embed::ModelSpec;
 /// speed/quality sweet spot for final top-few rescoring.
 pub const RERANK_MAX_TOKENS: usize = 512;
 
-const PAD_ID: u32 = 1; // XLM-RoBERTa pad token
-
 /// Default reranker model: BGE-v2-m3 ONNX (multilingual, strong
 /// cross-encoder; ~1.2s/pair on CPU — the `balanced` preset swaps to
 /// minilm for latency).
@@ -135,9 +133,17 @@ impl Reranker {
                 ..Default::default()
             }))
             .map_err(|e| anyhow::anyhow!("set truncation: {e}"))?;
+        // Pad config is family-specific: BERT exports (MiniLM) pad with
+        // "[PAD]"=0, XLM-R exports (BGE) with "<pad>"=1. Read the id the
+        // model's own tokenizer actually defines (GH#4 — hardcoding the
+        // XLM-R value scrambled MiniLM's padding).
+        let (pad_id, pad_token) = ["[PAD]", "<pad>"]
+            .into_iter()
+            .find_map(|t| tokenizer.token_to_id(t).map(|id| (id, t)))
+            .unwrap_or((0, "[PAD]"));
         tokenizer.with_padding(Some(PaddingParams {
-            pad_id: PAD_ID,
-            pad_token: "<pad>".into(),
+            pad_id,
+            pad_token: pad_token.into(),
             ..Default::default()
         }));
         Ok(Self {
@@ -173,9 +179,11 @@ impl Reranker {
             .unwrap_or(0);
         let mut ids = Vec::with_capacity(batch * seq);
         let mut mask = Vec::with_capacity(batch * seq);
+        let mut type_ids = Vec::with_capacity(batch * seq);
         for enc in &encodings {
             ids.extend(enc.get_ids().iter().map(|&t| t as i64));
             mask.extend(enc.get_attention_mask().iter().map(|&t| t as i64));
+            type_ids.extend(enc.get_type_ids().iter().map(|&t| t as i64));
         }
         let shape = vec![batch, seq];
         let mut feeds: Vec<(String, SessionInputValue)> = vec![
@@ -213,8 +221,15 @@ impl Reranker {
                 Tensor::<f32>::from_array((d, Vec::new()))
                     .with_context(|| format!("extra input {name}"))?
                     .into()
+            } else if name == "token_type_ids" {
+                // Feed REAL segment ids — BERT-family pair rankers
+                // (MiniLM) can't tell query from passage on all-zero
+                // token_type_ids (GH#4). XLM-R models emit zeros here
+                // anyway, so this is also correct for them.
+                Tensor::from_array((d, type_ids.clone()))
+                    .with_context(|| format!("extra input {name}"))?
+                    .into()
             } else {
-                // token_type_ids and friends: zeros like ids.
                 let zeros = vec![0i64; d.iter().product()];
                 Tensor::from_array((d, zeros))
                     .with_context(|| format!("extra input {name}"))?

@@ -89,10 +89,13 @@ struct DaemonState {
     embedder: EmbedderPool,
     embedder_repo: String,
     /// Lazy per-name reranker pools (t3-css.2.6): a daemon may serve
-    /// minilm AND bge-m3 queries — each loads on first use.
-    rerankers: Mutex<rustc_hash::FxHashMap<String, RerankerPool>>,
+    /// minilm AND bge-m3 queries — each loads on first use. Arc'd so a
+    /// query scores WITHOUT holding the map lock across the forward
+    /// (t3-75a — one slow rerank used to serialize all pool lookups).
+    rerankers: Mutex<rustc_hash::FxHashMap<String, Arc<RerankerPool>>>,
     reranker_default: String,
     rerank_max_tokens: usize,
+    rerank_sessions: usize,
     corpora: RwLock<HashMap<String, Arc<Corpus>>>,
     query_cache: Mutex<QueryLru>,
     ep: crate::cli::Ep,
@@ -350,6 +353,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
         rerankers: Mutex::new(rustc_hash::FxHashMap::default()),
         reranker_default: args.reranker.clone(),
         rerank_max_tokens: args.rerank_tokens,
+        rerank_sessions: args.rerank_sessions,
         corpora: RwLock::new(HashMap::new()),
         query_cache: Mutex::new(QueryLru::new(128)),
         ep: args.ep,
@@ -843,19 +847,32 @@ fn do_search<'a>(st: &'a DaemonState, req: &'a SearchRequest) -> Result<SearchRe
             ids.push((*ci, *id));
         }
         // Lazy per-name reranker pools; a load failure degrades to the
-        // fused ranking rather than failing the query.
-        let mut guard = st.rerankers.lock().unwrap();
-        if !guard.contains_key(&rr_name) {
-            match rerank::spec(&rr_name)
-                .and_then(|s| RerankerPool::load(&s, st.threads, st.ep, 1, st.rerank_max_tokens))
-            {
-                Ok(p) => {
-                    guard.insert(rr_name.clone(), p);
-                }
-                Err(e) => tracing::warn!(reranker = %rr_name, "reranker unavailable: {e:#}"),
+        // fused ranking rather than failing the query. The map lock is
+        // held only to get/insert the Arc — never across the forward.
+        let pool = {
+            let mut guard = st.rerankers.lock().unwrap();
+            match guard.get(&rr_name) {
+                Some(p) => Some(Arc::clone(p)),
+                None => match rerank::spec(&rr_name).and_then(|s| {
+                    RerankerPool::load(
+                        &s,
+                        st.threads,
+                        st.ep,
+                        st.rerank_sessions,
+                        st.rerank_max_tokens,
+                    )
+                }) {
+                    Ok(p) => Some(Arc::clone(
+                        guard.entry(rr_name.clone()).or_insert_with(|| Arc::new(p)),
+                    )),
+                    Err(e) => {
+                        tracing::warn!(reranker = %rr_name, "reranker unavailable: {e:#}");
+                        None
+                    }
+                },
             }
-        }
-        if let Some(pool) = guard.get_mut(&rr_name) {
+        };
+        if let Some(pool) = pool {
             let scores = pool.score_pairs(&pairs)?;
             let mut rr: Vec<(usize, u64, f32)> = ids
                 .into_iter()
@@ -1403,9 +1420,11 @@ async fn mcp_http(
                 if let Ok(rd) = std::fs::read_dir(&st.corpora_root) {
                     for e in rd.flatten() {
                         if let Ok(m) = store::read_meta(&e.path()) {
+                            let name = e.file_name().to_string_lossy().to_string();
                             out.push(serde_json::json!({
-                                "corpus": e.file_name().to_string_lossy(),
+                                "corpus": name,
                                 "docs": m.doc_count,
+                                "loaded": st.corpora.read().unwrap().contains_key(&name),
                                 "transform": m.manifest.as_ref()
                                     .map(|m| m.transform.clone()).unwrap_or_else(|| "unknown".into()),
                                 "top_terms": m.manifest.as_ref()
@@ -1414,9 +1433,12 @@ async fn mcp_http(
                         }
                     }
                 }
-                return Ok(crate::mcp::tool_response(
-                    &serde_json::json!({"corpora": out}),
-                ));
+                // t3-6va / GH#5: render the same table the stdio proxy
+                // serves — tool_response only formats hit-shaped results
+                // and produced empty text here.
+                return Ok(serde_json::json!({
+                    "content": [{"type": "text", "text": crate::mcp::corpora_table(&serde_json::json!({"corpora": out}))}]
+                }));
             }
             if name == "suggest" {
                 let q = args["query"].as_str().context("suggest requires query")?;
@@ -1445,7 +1467,9 @@ async fn mcp_http(
                         }
                     }
                 }
-                return Ok(crate::mcp::tool_response(&serde_json::json!({"corpora": rows})));
+                return Ok(serde_json::json!({
+                    "content": [{"type": "text", "text": crate::mcp::suggest_table(&serde_json::json!({"corpora": rows}))}]
+                }));
             }
             // get_passage (t3-vqd): pure store read via the loaded corpus —
             // no embed, no fusion; mirrors GET /passages/{corpus}/{id}.

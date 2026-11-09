@@ -215,6 +215,57 @@ pub fn handle_rpc(
     }
 }
 
+/// Shared `list_corpora` table for both MCP paths (t3-6va): accepts
+/// either the `/corpora` array itself or a `{"corpora": [...]}` body.
+/// Tolerates the in-daemon row shape (`corpus`/`docs`) and the REST
+/// shape (`name`/`doc_count`/`loaded`/`manifest.*`).
+pub(crate) fn corpora_table(rows: &Value) -> String {
+    let arr = rows.as_array().or_else(|| rows["corpora"].as_array());
+    let mut t = String::from("corpus\tdocs\tloaded\ttransform\ttop_terms\n");
+    for c in arr.into_iter().flat_map(|a| a.iter()) {
+        t += &format!(
+            "{}\t{}\t{}\t{}\t{}\n",
+            c["name"].as_str().or(c["corpus"].as_str()).unwrap_or("?"),
+            c["docs"].as_u64().or(c["doc_count"].as_u64()).unwrap_or(0),
+            c["loaded"].as_bool().unwrap_or(false),
+            c["transform"]
+                .as_str()
+                .or(c["manifest"]["transform"].as_str())
+                .unwrap_or("unknown"),
+            c["top_terms"]
+                .as_array()
+                .or(c["manifest"]["top_terms"].as_array())
+                .map(|ts| ts
+                    .iter()
+                    .filter_map(|t| t.as_str())
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .join(","))
+                .unwrap_or_default(),
+        );
+    }
+    t
+}
+
+/// Shared `suggest` table (`{"corpora": [{corpus, transform, docs,
+/// similarity}]}`), used by the stdio proxy and the in-daemon handler.
+pub(crate) fn suggest_table(v: &Value) -> String {
+    let mut t = String::from("corpus\ttransform\tdocs\tsimilarity\n");
+    for r in v["corpora"].as_array().iter().flat_map(|a| a.iter()) {
+        t += &format!(
+            "{}\t{}\t{}\t{}\n",
+            r["corpus"].as_str().unwrap_or("?"),
+            r["transform"].as_str().unwrap_or("?"),
+            r["docs"].as_u64().unwrap_or(0),
+            r["similarity"]
+                .as_f64()
+                .map(|s| format!("{s:.3}"))
+                .unwrap_or_else(|| "n/a".into()),
+        );
+    }
+    t
+}
+
 /// Render daemon search results into the MCP `content` shape
 /// (`text` blocks per hit).
 pub fn tool_response(resp: &Value) -> Value {
@@ -380,30 +431,7 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
                 .call()
                 .context("daemon /corpora")?;
             let v: Value = resp.body_mut().read_json().context("daemon response")?;
-            let mut t = String::from("corpus\tdocs\tloaded\ttransform\ttop_terms\n");
-            for c in v.as_array().iter().flat_map(|a| a.iter()) {
-                t += &format!(
-                    "{}\t{}\t{}\t{}\t{}\n",
-                    c["name"].as_str().or(c["corpus"].as_str()).unwrap_or("?"),
-                    c["docs"].as_u64().or(c["doc_count"].as_u64()).unwrap_or(0),
-                    c["loaded"].as_bool().unwrap_or(false),
-                    c["transform"]
-                        .as_str()
-                        .or(c["manifest"]["transform"].as_str())
-                        .unwrap_or("unknown"),
-                    c["top_terms"]
-                        .as_array()
-                        .or(c["manifest"]["top_terms"].as_array())
-                        .map(|ts| ts
-                            .iter()
-                            .filter_map(|t| t.as_str())
-                            .take(4)
-                            .collect::<Vec<_>>()
-                            .join(","))
-                        .unwrap_or_default(),
-                );
-            }
-            return Ok(json!({"content": [{"type": "text", "text": t}]}));
+            return Ok(json!({"content": [{"type": "text", "text": corpora_table(&v)}]}));
         }
         if name == "suggest" {
             let q = a["query"].as_str().unwrap_or("");
@@ -412,20 +440,7 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
                 .call()
                 .context("daemon /suggest")?;
             let v: Value = resp.body_mut().read_json().context("daemon response")?;
-            let mut t = String::from("corpus\ttransform\tdocs\tsimilarity\n");
-            for r in v["corpora"].as_array().iter().flat_map(|a| a.iter()) {
-                t += &format!(
-                    "{}\t{}\t{}\t{}\n",
-                    r["corpus"].as_str().unwrap_or("?"),
-                    r["transform"].as_str().unwrap_or("?"),
-                    r["docs"].as_u64().unwrap_or(0),
-                    r["similarity"]
-                        .as_f64()
-                        .map(|s| format!("{s:.3}"))
-                        .unwrap_or_else(|| "n/a".into()),
-                );
-            }
-            return Ok(json!({"content": [{"type": "text", "text": t}]}));
+            return Ok(json!({"content": [{"type": "text", "text": suggest_table(&v)}]}));
         }
         // get_passage (t3-vqd): straight GET to the daemon's route —
         // corpus defaults to the daemon's newest when omitted.
