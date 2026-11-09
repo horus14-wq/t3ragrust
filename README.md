@@ -17,6 +17,14 @@ curl -fsSL https://raw.githubusercontent.com/horus14-wq/t3ragrust/main/install.s
 # ($ORIGIN rpath). cuda needs NVIDIA driver + CUDA 13 runtime + cuDNN 9.
 ```
 
+Windows (PowerShell):
+
+```powershell
+irm https://raw.githubusercontent.com/horus14-wq/t3ragrust/main/install.ps1 | iex
+# $env:T3RAG_EP='directml'   # or cuda / openvino / cpu
+# $env:T3RAG_VERSION='v0.1.1'; $env:T3RAG_DIR="$HOME\.local\bin"
+```
+
 Then:
 
 ```bash
@@ -48,6 +56,13 @@ t3rag serve                                 # http://127.0.0.1:7317
 t3rag mcp                                   # stdio MCP (proxies to daemon)
 t3rag skill --agents devin                  # install the agent skill
 ```
+
+MCP clients that accept a URL should register the daemon's streamable-HTTP
+endpoint (`{"url": "http://127.0.0.1:7317/mcp"}`) — models stay warm and the
+handshake is instant. `t3rag mcp` is the stdio fallback for subprocess-only
+clients; it auto-detects NDJSON and Content-Length framing, answers
+`initialize`/`tools/list` immediately, and spawns the daemon in the
+background on first tool call.
 
 ## Architecture
 

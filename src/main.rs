@@ -48,6 +48,12 @@ fn main() -> Result<()> {
         .map(EnvFilter::new)
         .or_else(|| EnvFilter::try_from_default_env().ok())
         .unwrap_or_else(|| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    // Logs go to stderr, not stdout: `t3rag mcp` speaks JSON-RPC on
+    // stdout and a single stray log line corrupts the protocol stream
+    // (GH#3 — Grok stdio "initializing → unavailable").
+    tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .with_writer(std::io::stderr)
+        .init();
     cli.run()
 }

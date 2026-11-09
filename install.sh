@@ -34,7 +34,10 @@ tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 echo "downloading $url"
 curl -fsSL "$url" -o "$tmp/pkg.tar.gz"
 curl -fsSL "$url.sha256" -o "$tmp/pkg.sha256"
-(cd "$tmp" && echo "$(cut -d' ' -f1 pkg.sha256)  pkg.tar.gz" | shasum -a 256 -c -) \
+# Accepts both `HASH  file` and hash-only .sha256 files. Probe sha256sum
+# (GNU coreutils) first — minimal/musl images may lack perl's shasum.
+(cd "$tmp" && echo "$(cut -d' ' -f1 pkg.sha256)  pkg.tar.gz" \
+  | if command -v sha256sum >/dev/null; then sha256sum -c -; else shasum -a 256 -c -; fi) \
   || { echo "checksum mismatch" >&2; exit 1; }
 tar -xzf "$tmp/pkg.tar.gz" -C "$tmp"
 mkdir -p "$DIR"

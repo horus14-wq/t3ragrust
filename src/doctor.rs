@@ -172,6 +172,8 @@ pub fn run_doctor(deep: bool) -> Result<()> {
     eps.push("webgpu");
     #[cfg(feature = "ep-coreml")]
     eps.push("coreml");
+    #[cfg(feature = "ep-directml")]
+    eps.push("directml");
     println!("ep built-in: {}", eps.join(", "));
     // HF cache: model repos we actually use.
     let hf = dirs_hf_cache();

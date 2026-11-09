@@ -113,12 +113,14 @@ fn tools_list() -> Value {
 /// surface, t3-css.3.6).
 /// `exec` receives `(tool_name, arguments)` — one closure branches
 /// across the whole tool surface (t3-vqd: get_passage added).
-/// `ctx` supplies the state prompts/resources answer from:
-/// `{corpora: [{name, manifest}], playbook: "<SKILL.md text>"}` (t3-ixu).
+/// `ctx` builds the state prompts/resources answer from on demand
+/// (GH#3): `{corpora: [{name, manifest}], playbook: "<SKILL.md text>"}`
+/// (t3-ixu). Called only by prompts/resources methods — never for
+/// initialize/tools/list, which must stay daemon-free.
 pub fn handle_rpc(
     msg: &Value,
     exec: &dyn Fn(&str, &Value) -> Result<Value>,
-    ctx: &Value,
+    ctx: &dyn Fn() -> Value,
 ) -> Option<Value> {
     let id = msg.get("id").cloned().unwrap_or(Value::Null);
     let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
@@ -146,12 +148,12 @@ pub fn handle_rpc(
                 "role": "user",
                 "content": {
                     "type": "text",
-                    "text": ctx["playbook"].as_str().unwrap_or("playbook unavailable")
+                    "text": ctx()["playbook"].as_str().unwrap_or("playbook unavailable")
                 }
             }]
         })),
         "resources/list" => Ok(json!({
-            "resources": ctx["corpora"].as_array().map(|cs| cs.iter().map(|c| json!({
+            "resources": ctx()["corpora"].as_array().map(|cs| cs.iter().map(|c| json!({
                 "uri": format!("t3rag://corpus/{}", c["name"].as_str().unwrap_or("?")),
                 "name": format!("t3rag corpus {}", c["name"].as_str().unwrap_or("?")),
                 "mimeType": "application/json"
@@ -163,15 +165,16 @@ pub fn handle_rpc(
                 .and_then(Value::as_str)
                 .unwrap_or("");
             let name = uri.strip_prefix("t3rag://corpus/").unwrap_or("");
-            match ctx["corpora"]
-                .as_array()
-                .and_then(|cs| cs.iter().find(|c| c["name"].as_str() == Some(name)))
-            {
+            match ctx()["corpora"].as_array().and_then(|cs| {
+                cs.iter()
+                    .find(|c| c["name"].as_str() == Some(name))
+                    .cloned()
+            }) {
                 Some(c) => Ok(json!({
                     "contents": [{
                         "uri": uri,
                         "mimeType": "application/json",
-                        "text": serde_json::to_string_pretty(c).unwrap_or_default()
+                        "text": serde_json::to_string_pretty(&c).unwrap_or_default()
                     }]
                 })),
                 None => Err(format!("unknown resource: {uri}")),
@@ -241,22 +244,108 @@ pub fn tool_response(resp: &Value) -> Value {
 
 // ---------------- stdio proxy ----------------
 
-/// `t3rag mcp` — newline-delimited JSON-RPC on stdin/stdout.
+/// Stdio framing dialect (GH#3): the MCP spec's stdio transport is
+/// newline-delimited JSON (NDJSON), but LSP-heritage hosts speak
+/// `Content-Length` headers. Auto-detected per message; responses echo
+/// the detected framing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Framing {
+    /// `{...}\n` — the spec's stdio dialect.
+    Ndjson,
+    /// `Content-Length: N\r\n\r\n{...}` — LSP-style framing.
+    ContentLength,
+}
+
+/// Read one JSON-RPC message body, sniffing framing on each read.
+/// Returns `None` on clean EOF. Header blocks (`Content-Length: N`
+/// followed by more headers, a blank line, then N bytes) and bare NDJSON
+/// lines are both accepted; blank lines are skipped.
+fn read_message<R: BufRead>(r: &mut R, framing: &mut Option<Framing>) -> Result<Option<String>> {
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if r.read_line(&mut line).context("read stdin")? == 0 {
+            return Ok(None);
+        }
+        if !line.trim().is_empty() {
+            break;
+        }
+    }
+    if line
+        .trim_start()
+        .to_ascii_lowercase()
+        .starts_with("content-length:")
+    {
+        *framing = Some(Framing::ContentLength);
+        let len: usize = line
+            .split(':')
+            .nth(1)
+            .and_then(|v| v.trim().parse().ok())
+            .context("bad Content-Length header")?;
+        // Consume any remaining headers (Content-Type, …) to the blank line.
+        loop {
+            line.clear();
+            if r.read_line(&mut line)? == 0 || line.trim().is_empty() {
+                break;
+            }
+        }
+        let mut body = vec![0u8; len];
+        r.read_exact(&mut body).context("read message body")?;
+        String::from_utf8(body)
+            .map(Some)
+            .context("message body is not UTF-8")
+    } else {
+        *framing = Some(Framing::Ndjson);
+        Ok(Some(line.trim_end().to_string()))
+    }
+}
+
+/// Emit one JSON-RPC response in the negotiated framing.
+fn write_message<W: Write>(w: &mut W, framing: Framing, msg: &Value) -> Result<()> {
+    let body = msg.to_string();
+    match framing {
+        Framing::Ndjson => writeln!(w, "{body}")?,
+        Framing::ContentLength => write!(w, "Content-Length: {}\r\n\r\n{body}", body.len())?,
+    }
+    w.flush()?;
+    Ok(())
+}
+
 /// `t3rag mcp`: stdio MCP server that proxies each `tools/call` to
 /// the running daemon via HTTP — never loads models itself.
 ///
+/// The daemon is resolved lazily on first use (GH#3): `ensure_daemon`
+/// can block for minutes cold-spawning, and `initialize`/`tools/list`
+/// must answer inside the client's handshake budget. A warm thread kicks
+/// the spawn at startup so the wait overlaps the handshake instead of
+/// sitting inside it. Only `tools/call` (and corpus-backed
+/// prompts/resources) ever touch the daemon.
+///
 /// # Errors
-/// A line is unreadable, or a proxied daemon query fails.
+/// A stream is unreadable, or a proxied daemon query fails.
 pub fn run_mcp(args: McpArgs) -> Result<()> {
-    let base = match args.daemon_url.as_deref() {
-        Some(u) => u.to_string(),
-        None => crate::serve::ensure_daemon()?,
+    let daemon_url = args.daemon_url.clone();
+    let base = std::sync::Arc::new(std::sync::LazyLock::new(move || match daemon_url {
+        Some(u) => Ok(u),
+        None => crate::serve::ensure_daemon().map_err(|e| format!("{e:#}")),
+    }));
+    {
+        let warm = std::sync::Arc::clone(&base);
+        std::thread::spawn(move || {
+            let _ = std::sync::LazyLock::force(&warm);
+        });
+    }
+    let daemon = || -> Result<&str> {
+        std::sync::LazyLock::force(&base)
+            .as_deref()
+            .map_err(|e| anyhow::anyhow!("{e}"))
     };
-    info!(%base, "mcp stdio proxy ready");
+    info!("mcp stdio proxy ready");
     let stdin = std::io::stdin();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let exec = |name: &str, a: &Value| -> Result<Value> {
+        let base = daemon()?;
         // batch_search (t3-w4d): N independent POSTs to the warm daemon.
         if name == "batch_search" {
             let corpus = a["corpus"].as_str().unwrap_or("");
@@ -291,19 +380,20 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
                 .call()
                 .context("daemon /corpora")?;
             let v: Value = resp.body_mut().read_json().context("daemon response")?;
-            let mut t = String::from("corpus\tdocs\ttransform\ttop_terms\n");
+            let mut t = String::from("corpus\tdocs\tloaded\ttransform\ttop_terms\n");
             for c in v.as_array().iter().flat_map(|a| a.iter()) {
                 t += &format!(
-                    "{}\t{}\t{}\t{}\n",
+                    "{}\t{}\t{}\t{}\t{}\n",
                     c["name"].as_str().or(c["corpus"].as_str()).unwrap_or("?"),
                     c["docs"].as_u64().or(c["doc_count"].as_u64()).unwrap_or(0),
-                    c["manifest"]["transform"]
+                    c["loaded"].as_bool().unwrap_or(false),
+                    c["transform"]
                         .as_str()
-                        .or(c["transform"].as_str())
+                        .or(c["manifest"]["transform"].as_str())
                         .unwrap_or("unknown"),
-                    c["manifest"]["top_terms"]
+                    c["top_terms"]
                         .as_array()
-                        .or(c["top_terms"].as_array())
+                        .or(c["manifest"]["top_terms"].as_array())
                         .map(|ts| ts
                             .iter()
                             .filter_map(|t| t.as_str())
@@ -378,39 +468,50 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
         let v: Value = resp.body_mut().read_json().context("daemon response")?;
         Ok(tool_response(&v))
     };
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let msg: Value = match serde_json::from_str(&line) {
-            Ok(v) => v,
-            Err(e) => {
-                writeln!(
-                    out,
-                    "{}",
-                    json!({
-                        "jsonrpc":"2.0","id":null,
-                        "error":{"code":-32700,"message":format!("parse error: {e}")}
-                    })
-                )?;
-                continue;
-            }
-        };
-        // t3-ixu: build ctx lazily — corpora/manifests + the SKILL playbook
-        // so prompts/resources answer without a prior SKILL.md install.
-        let ctx = std::sync::LazyLock::new(|| {
-            let mut corpora = Vec::new();
-            if let Ok(mut r) = ureq::get(&format!("{base}/corpora")).call() {
+    // t3-ixu: ctx for prompts/resources — corpora/manifests + the SKILL
+    // playbook, built only when a method asks for it (daemon-free
+    // initialize/tools/list stay that way).
+    let build_ctx = || -> Value {
+        let mut corpora = Vec::new();
+        if let Ok(b) = daemon() {
+            if let Ok(mut r) = ureq::get(&format!("{b}/corpora")).call() {
                 if let Ok(v) = r.body_mut().read_json::<Value>() {
                     corpora = v.as_array().cloned().unwrap_or_default();
                 }
             }
-            json!({"corpora": corpora, "playbook": crate::skill::SKILL_MD})
-        });
-        if let Some(resp) = handle_rpc(&msg, &exec, &ctx) {
-            writeln!(out, "{resp}")?;
-            out.flush()?;
+        }
+        json!({"corpora": corpora, "playbook": crate::skill::SKILL_MD})
+    };
+    let mut reader = std::io::BufReader::new(stdin.lock());
+    serve_stream(&mut reader, &mut out, &exec, &build_ctx)
+}
+
+/// The stdio read/dispatch/write loop — split from `run_mcp` so tests
+/// can drive it over in-memory buffers in both framings.
+fn serve_stream<R: BufRead, W: Write>(
+    reader: &mut R,
+    out: &mut W,
+    exec: &dyn Fn(&str, &Value) -> Result<Value>,
+    ctx: &dyn Fn() -> Value,
+) -> Result<()> {
+    let mut framing: Option<Framing> = None;
+    while let Some(body) = read_message(reader, &mut framing)? {
+        let msg: Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                write_message(
+                    out,
+                    framing.unwrap_or(Framing::Ndjson),
+                    &json!({
+                        "jsonrpc":"2.0","id":null,
+                        "error":{"code":-32700,"message":format!("parse error: {e}")}
+                    }),
+                )?;
+                continue;
+            }
+        };
+        if let Some(resp) = handle_rpc(&msg, exec, ctx) {
+            write_message(out, framing.unwrap_or(Framing::Ndjson), &resp)?;
         }
     }
     Ok(())
@@ -422,17 +523,21 @@ pub fn run_mcp(args: McpArgs) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn no_ctx() -> Value {
+        json!({})
+    }
+
     #[test]
     fn initialize_returns_server_info() {
         let m = serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize"});
-        let r = handle_rpc(&m, &|_, _| unreachable!(), &json!({})).unwrap();
+        let r = handle_rpc(&m, &|_, _| unreachable!(), &no_ctx).unwrap();
         assert_eq!(r["result"]["serverInfo"]["name"], "t3rag");
     }
 
     #[test]
     fn tools_list_exposes_search_traces() {
         let m = serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
-        let r = handle_rpc(&m, &|_, _| unreachable!(), &json!({})).unwrap();
+        let r = handle_rpc(&m, &|_, _| unreachable!(), &no_ctx).unwrap();
         let name = r["result"]["tools"][0]["name"].as_str().unwrap();
         assert_eq!(name, "search_traces");
     }
@@ -446,7 +551,7 @@ mod tests {
         let r = handle_rpc(
             &m,
             &|_, _| Ok(serde_json::json!({"content":[{"type":"text","text":"ok"}]})),
-            &json!({}),
+            &no_ctx,
         )
         .unwrap();
         assert_eq!(r["result"]["content"][0]["text"], "ok");
@@ -455,7 +560,7 @@ mod tests {
     #[test]
     fn notification_gets_no_response() {
         let m = serde_json::json!({"jsonrpc":"2.0","method":"notifications/initialized"});
-        assert!(handle_rpc(&m, &|_, _| unreachable!(), &json!({})).is_none());
+        assert!(handle_rpc(&m, &|_, _| unreachable!(), &no_ctx).is_none());
     }
 
     #[test]
@@ -464,10 +569,122 @@ mod tests {
             "jsonrpc":"2.0","id":4,"method":"tools/call",
             "params":{"name":"nope","arguments":{}}
         });
-        let r = handle_rpc(&m, &|_, _| unreachable!(), &json!({})).unwrap();
+        let r = handle_rpc(&m, &|_, _| unreachable!(), &no_ctx).unwrap();
         assert!(r["error"]["message"]
             .as_str()
             .unwrap()
             .contains("unknown tool"));
+    }
+
+    // ---- stdio framing (GH#3): NDJSON + Content-Length auto-detect ----
+
+    #[test]
+    fn read_ndjson_line() {
+        let mut input = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n".as_slice();
+        let mut f = None;
+        let msg = read_message(&mut input, &mut f).unwrap().unwrap();
+        assert!(msg.contains("ping"));
+        assert_eq!(f, Some(Framing::Ndjson));
+    }
+
+    #[test]
+    fn read_content_length_framed() {
+        let body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}";
+        let wire = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        let mut input = wire.as_bytes();
+        let mut f = None;
+        let msg = read_message(&mut input, &mut f).unwrap().unwrap();
+        assert_eq!(msg, body);
+        assert_eq!(f, Some(Framing::ContentLength));
+    }
+
+    #[test]
+    fn read_content_length_extra_headers_and_multibyte() {
+        // vscode-jsonrpc sends Content-Type; len is BYTES not chars.
+        let body = "{\"q\":\"héllo→wörld\"}";
+        let wire = format!(
+            "Content-Length: {}\r\nContent-Type: application/vscode-jsonrpc; charset=utf-8\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let mut input = wire.as_bytes();
+        let mut f = None;
+        assert_eq!(read_message(&mut input, &mut f).unwrap().unwrap(), body);
+    }
+
+    #[test]
+    fn read_framed_messages_back_to_back() {
+        let a = "{\"id\":1}";
+        let b = "{\"id\":2}";
+        let wire = format!(
+            "Content-Length: {}\r\n\r\n{}Content-Length: {}\r\n\r\n{}",
+            a.len(),
+            a,
+            b.len(),
+            b
+        );
+        let mut input = wire.as_bytes();
+        let mut f = None;
+        assert_eq!(read_message(&mut input, &mut f).unwrap().unwrap(), a);
+        assert_eq!(read_message(&mut input, &mut f).unwrap().unwrap(), b);
+        assert!(read_message(&mut input, &mut f).unwrap().is_none());
+    }
+
+    #[test]
+    fn read_skips_blank_lines_then_eof() {
+        let mut input = b"\n\r\n{\"id\":1}\n".as_slice();
+        let mut f = None;
+        assert_eq!(
+            read_message(&mut input, &mut f).unwrap().unwrap(),
+            "{\"id\":1}"
+        );
+        assert!(read_message(&mut input, &mut f).unwrap().is_none());
+    }
+
+    #[test]
+    fn write_echoes_detected_framing() {
+        let mut buf = Vec::new();
+        write_message(&mut buf, Framing::Ndjson, &json!({"id":1})).unwrap();
+        assert_eq!(buf, b"{\"id\":1}\n");
+        buf.clear();
+        write_message(&mut buf, Framing::ContentLength, &json!({"id":1})).unwrap();
+        assert_eq!(buf, b"Content-Length: 8\r\n\r\n{\"id\":1}");
+    }
+
+    /// GH#3 acceptance: an NDJSON client gets initialize + tools/list
+    /// back without a daemon ever being touched.
+    #[test]
+    fn stdio_ndjson_handshake_needs_no_daemon() {
+        let input = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}\n"
+        );
+        let mut r = std::io::BufReader::new(input.as_bytes());
+        let mut out = Vec::new();
+        serve_stream(&mut r, &mut out, &|_, _| panic!("daemon hit"), &no_ctx).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let init: Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(init["result"]["serverInfo"]["name"], "t3rag");
+        let tools: Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(tools["result"]["tools"].as_array().unwrap().len(), 5);
+    }
+
+    /// GH#3 acceptance: a Content-Length (LSP-heritage) client gets the
+    /// same handshake in its own framing.
+    #[test]
+    fn stdio_content_length_handshake() {
+        let body = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}";
+        let wire = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        let mut r = std::io::BufReader::new(wire.as_bytes());
+        let mut out = Vec::new();
+        serve_stream(&mut r, &mut out, &|_, _| panic!("daemon hit"), &no_ctx).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("Content-Length: "));
+        let body_start = text.find("\r\n\r\n").unwrap() + 4;
+        let v: Value = serde_json::from_str(&text[body_start..]).unwrap();
+        assert_eq!(v["result"]["serverInfo"]["name"], "t3rag");
     }
 }

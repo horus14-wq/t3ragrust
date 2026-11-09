@@ -1,6 +1,6 @@
 [package]
 name = "t3rag"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Rust-native retrieval over thinking traces: CLI + daemon + MCP server"
 license = "MIT OR Apache-2.0"

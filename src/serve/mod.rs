@@ -471,18 +471,22 @@ async fn list_corpora(State(st): State<Arc<DaemonState>>) -> impl IntoResponse {
     }
     names.sort();
     for n in names {
-        // doc_count from meta.json on disk — unloaded corpora aren't
-        // zero-doc, they just aren't mapped yet (t3-ixu fix).
-        let (loaded, docs) = match st.corpora.read().unwrap().get(&n) {
-            Some(c) => (true, c.meta.doc_count),
-            None => (
-                false,
-                store::read_meta(&st.corpora_root.join(&n))
-                    .map(|m| m.doc_count)
-                    .unwrap_or(0),
-            ),
+        // doc_count + manifest from meta.json on disk — unloaded corpora
+        // aren't zero-doc, they just aren't mapped yet (t3-ixu fix).
+        // transform/top_terms ride along so `t3rag mcp`'s list_corpora
+        // can route without a second pass (GH#3).
+        let (loaded, meta) = match st.corpora.read().unwrap().get(&n) {
+            Some(c) => (true, Some(c.meta.clone())),
+            None => (false, store::read_meta(&st.corpora_root.join(&n)).ok()),
         };
-        out.push(serde_json::json!({"name": n, "loaded": loaded, "doc_count": docs}));
+        let manifest = meta.as_ref().and_then(|m| m.manifest.as_ref());
+        out.push(serde_json::json!({
+            "name": n,
+            "loaded": loaded,
+            "doc_count": meta.as_ref().map(|m| m.doc_count).unwrap_or(0),
+            "transform": manifest.map(|m| m.transform.as_str()),
+            "top_terms": manifest.map(|m| m.top_terms.clone()),
+        }));
     }
     Json(serde_json::json!(out))
 }
@@ -1510,10 +1514,12 @@ async fn mcp_http(
             Ok(crate::mcp::tool_response(&serde_json::to_value(resp)?))
         };
         // t3-ixu: ctx for prompts/resources — corpus manifests from disk
-        // (loaded or not) + the SKILL playbook.
-        let ctx = {
+        // (loaded or not) + the SKILL playbook, built on demand (GH#3 —
+        // initialize/tools/list skip the dir walk entirely).
+        let st_ctx = std::sync::Arc::clone(&st);
+        let build_ctx = move || {
             let mut corpora = Vec::new();
-            if let Ok(rd) = std::fs::read_dir(&st.corpora_root) {
+            if let Ok(rd) = std::fs::read_dir(&st_ctx.corpora_root) {
                 for e in rd.flatten() {
                     if let Ok(m) = store::read_meta(&e.path()) {
                         corpora.push(serde_json::json!({
@@ -1528,7 +1534,7 @@ async fn mcp_http(
             }
             serde_json::json!({"corpora": corpora, "playbook": crate::skill::SKILL_MD})
         };
-        crate::mcp::handle_rpc(&msg2, &exec, &ctx)
+        crate::mcp::handle_rpc(&msg2, &exec, &build_ctx)
     })
     .await;
     match result {

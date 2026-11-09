@@ -101,8 +101,13 @@ group_by, expand, token_budget, format…), `suggest`, `list_corpora`,
 { "mcpServers": { "t3rag": { "url": "http://127.0.0.1:7317/mcp" } } }
 ```
 
-Start the daemon once: `t3rag serve` (auto-spawn also happens on first
-stdio-proxy call).
+Start the daemon once: `t3rag serve` (the stdio proxy also spawns it in
+the background when absent).
+
+Client dialects: VS Code `.vscode/mcp.json` uses
+`{"servers": {"t3rag": {"type": "http", "url": "…"}}}`; Codex/Grok TOML
+uses `[mcp_servers.t3rag] url = "…"`; `claude mcp add --transport http
+t3rag http://127.0.0.1:7317/mcp` for Claude Code.
 
 ### Register (stdio proxy — for MCP clients without HTTP)
 
@@ -111,7 +116,10 @@ stdio-proxy call).
 ```
 
 The stdio server NEVER loads the model itself — it proxies to the
-daemon, spawning it if absent.
+daemon. Handshake (`initialize`, `tools/list`, `ping`) answers
+immediately without the daemon; a cold daemon spawns in the background
+and only `tools/call` waits on it. Both NDJSON and `Content-Length`
+framing are auto-detected; logs go to stderr only.
 
 ## CLI quick reference
 

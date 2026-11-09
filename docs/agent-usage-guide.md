@@ -128,11 +128,53 @@ corpus manifests.
 - HTTP: `POST /search`, `POST /ask`, `GET /passages/{corpus}/{id}`,
   `GET /corpora`, `GET /suggest?q=`, `GET /health`, `GET /metrics`,
   `POST /mcp` (JSON-RPC), `GET /models`, `GET /capabilities`.
-- MCP stdio: `t3rag mcp` (proxies the daemon). Tools: `search_traces`,
-  `get_passage`, `batch_search`, `list_corpora`, `suggest`.
-  Prompts: `t3rag-playbook`. Resources: `t3rag://corpus/<name>`.
+- MCP stdio: `t3rag mcp` (proxies the daemon — never loads models
+  itself). Tools: `search_traces`, `get_passage`, `batch_search`,
+  `list_corpora`, `suggest`. Prompts: `t3rag-playbook`. Resources:
+  `t3rag://corpus/<name>`.
 - Install integration: `t3rag skill --install <dir>` writes a spec-layout
   `SKILL.md`; `t3rag mcp` wires into any MCP client.
+
+### MCP transport guide (GH#3)
+
+Two registrations cover every client — prefer the URL whenever the client
+accepts one:
+
+| Shape | Config | Use when |
+|-------|--------|----------|
+| **Streamable HTTP** (recommended) | `{"mcpServers": {"t3rag": {"url": "http://127.0.0.1:7317/mcp"}}}` | Any client accepting a URL — models stay warm, handshake is instant, many clients share one daemon |
+| **stdio** | `{"mcpServers": {"t3rag": {"command": "t3rag", "args": ["mcp"]}}}` | Subprocess-only clients (Claude Desktop, `claude mcp add`, Codex TOML, etc.) |
+
+Stdio notes:
+
+- `t3rag mcp` auto-detects **NDJSON and Content-Length** framing and
+  replies in kind — both dialects work.
+- `initialize`/`tools/list`/`ping` never touch the daemon — they answer
+  immediately even with no daemon running; the daemon is spawned in the
+  background at startup and only a `tools/call` (or a corpus-backed
+  prompt/resource) waits on it.
+- All logging goes to stderr; stdout carries only protocol frames.
+- If stdio times out on a cold box, register the HTTP URL instead — the
+  daemon only needs to be running once (`t3rag serve`).
+
+Client-specific snippets:
+
+```toml
+# Codex CLI / Grok Build — ~/.codex/config.toml (or ~/.grok/config.toml)
+[mcp_servers.t3rag]
+url = "http://127.0.0.1:7317/mcp"
+```
+
+```json
+// VS Code — .vscode/mcp.json
+{ "servers": { "t3rag": { "type": "http", "url": "http://127.0.0.1:7317/mcp" } } }
+```
+
+```bash
+# Claude Code
+claude mcp add --transport http t3rag http://127.0.0.1:7317/mcp
+# or stdio: claude mcp add t3rag -- t3rag mcp
+```
 
 ## 7. Corpus lifecycle
 
