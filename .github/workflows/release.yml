@@ -63,7 +63,7 @@ jobs:
       # replaces config rustflags, so mold must be re-specified here.
       - name: rpath $ORIGIN for bundled EP libs (Linux EP flavors)
         if: runner.os == 'Linux' && matrix.features != ''
-        run: echo 'RUSTFLAGS=-C link-arg=-fuse-ld=mold -C link-arg=-Wl,-rpath,$$ORIGIN' >> "$GITHUB_ENV"
+        run: echo 'RUSTFLAGS=-C link-arg=-fuse-ld=mold -C link-arg=-Wl,-rpath,$ORIGIN' >> "$GITHUB_ENV"
 
       - name: Build
         run: |
