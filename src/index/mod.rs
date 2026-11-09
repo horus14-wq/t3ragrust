@@ -426,10 +426,8 @@ mod rewrite_tests {
     fn rewrite_missing_items_questions() {
         use std::path::PathBuf;
         let dir = PathBuf::from(std::env::var("CORPUS_DIR").expect("CORPUS_DIR"));
-        let stage = dir.with_file_name(format!(
-            "{}.rw",
-            dir.file_name().unwrap().to_string_lossy()
-        ));
+        let stage =
+            dir.with_file_name(format!("{}.rw", dir.file_name().unwrap().to_string_lossy()));
         let _ = std::fs::remove_dir_all(&stage);
         let rd = crate::store::PassageReader::open(&dir).unwrap();
         let mut wr = crate::store::PassageWriter::create(&stage).unwrap();
@@ -466,7 +464,85 @@ mod rewrite_tests {
         for f in ["vectors.usearch", "vectors.raw.f32"] {
             std::fs::copy(dir.join(f), stage.join(f)).unwrap();
         }
-        eprintln!("rewrote {nulled}/{} questions → {}", rd.len(), stage.display());
+        eprintln!(
+            "rewrote {nulled}/{} questions → {}",
+            rd.len(),
+            stage.display()
+        );
+    }
+
+    /// Dedupe by exact text-hash (GH#5 follow-up: a 303× "senior red
+    /// teamer" cluster slipped past the upstream dedup — ~11 copies of
+    /// each of 40 bodies). Drops later occurrences, renumbers ids, and
+    /// remaps positional vectors (raw.f32 slices) into fresh
+    /// usearch/raw files — no re-embedding. Run:
+    ///   `CORPUS_DIR=~/.cache/t3rag/corpora/struct cargo test --release
+    ///     dedupe_corpus -- --ignored --nocapture`
+    #[test]
+    #[ignore = "one-off data dedup — run manually with CORPUS_DIR"]
+    fn dedupe_corpus() {
+        use std::path::PathBuf;
+        let dir = PathBuf::from(std::env::var("CORPUS_DIR").expect("CORPUS_DIR"));
+        let stage =
+            dir.with_file_name(format!("{}.rw", dir.file_name().unwrap().to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&stage);
+        let rd = crate::store::PassageReader::open(&dir).unwrap();
+        let raw = std::fs::read(dir.join("vectors.raw.f32")).unwrap();
+        let mut wr = crate::store::PassageWriter::create(&stage).unwrap();
+        let mut bm = crate::index::Bm25Builder::create(&stage, 256, 0).unwrap();
+        let mut dense = crate::index::DenseBuilder::create(
+            &stage,
+            1024,
+            crate::cli::Quantization::I8,
+            16,
+            128,
+            true,
+        )
+        .unwrap();
+        let mut acc = crate::manifest::ManifestAcc::new(1024);
+        let mut seen = std::collections::HashMap::new();
+        let mut id_map = std::collections::HashMap::new();
+        let (mut kept, mut dropped) = (0u64, 0u64);
+        for id in 0..rd.len() {
+            let mut p = rd.get(id).unwrap();
+            let h = crate::ingest::hash_text(&p.text);
+            if let Some(&twin) = seen.get(&h) {
+                id_map.insert(id, twin);
+                dropped += 1;
+                continue;
+            }
+            let v: Vec<f32> = raw[id as usize * 4096..(id as usize + 1) * 4096]
+                .chunks_exact(4)
+                .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                .collect();
+            seen.insert(h, kept);
+            id_map.insert(id, kept);
+            // Chunk records hydrate through parent_id — remap through
+            // the id translation (parents precede their chunks; a
+            // dropped parent's children adopt the kept twin).
+            if p.parent_id != id {
+                p.parent_id = *id_map.get(&p.parent_id).unwrap_or(&kept);
+            }
+            p.id = kept;
+            dense.add(kept, &v).unwrap();
+            wr.push(&p).unwrap();
+            bm.add(&p).unwrap();
+            acc.observe(&p);
+            acc.observe_vector(&v);
+            kept += 1;
+        }
+        wr.finish().unwrap();
+        bm.commit().unwrap();
+        dense.finish().unwrap();
+        let mut meta = crate::store::read_meta(&dir).unwrap();
+        meta.doc_count = kept;
+        meta.manifest = Some(acc.finish());
+        crate::store::write_meta(&stage, &meta).unwrap();
+        eprintln!(
+            "dedupe {}: kept {kept}, dropped {dropped} → {}",
+            dir.display(),
+            stage.display()
+        );
     }
 }
 
