@@ -70,6 +70,11 @@ jobs:
           if [ -z "${{ matrix.features }}" ]; then
             cargo build --release --locked
           else
+            # Force ort-sys's build script to rerun: a warm rust-cache
+            # restores target/ and skips the script, so the ORT dist is
+            # never downloaded into the pyke cache and the package step
+            # finds no provider libs to ship.
+            cargo clean -p ort-sys
             cargo build --release --locked --features "${{ matrix.features }}"
           fi
         shell: bash
