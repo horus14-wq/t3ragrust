@@ -87,19 +87,22 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             mkdir -p "pkg/$name" && cp target/release/t3rag.exe "pkg/$name/"
             # EP flavors: ship every onnxruntime*.dll the ort build
-            # downloaded into its pyke cache — base runtime + flavor
-            # providers — so the zip is fully self-contained. MSYS find
-            # traverses C:\ paths natively; -exec avoids xargs eating
-            # backslashes. directml ships no separate provider DLLs
-            # (provider is built into onnxruntime.dll).
+            # downloaded — base runtime + flavor providers — so the zip
+            # is fully self-contained. Done in PowerShell: MSYS bash's
+            # env/path translation proved unreliable across runs (the
+            # ort cache lives under LOCALAPPDATA\ort.pyke.io\dfbin or
+            # target\...\ort-sys OUT_DIR). directml ships no separate
+            # provider DLLs (provider is built into onnxruntime.dll).
             if [ -n "${{ matrix.features }}" ]; then
-              roots=("$HOME")
-              [ -n "${LOCALAPPDATA:-}" ] && roots+=("$LOCALAPPDATA")
-              find "${roots[@]}" -path '*ort.pyke.io*' -name 'onnxruntime*.dll' \
-                -exec cp {} "pkg/$name/" \; 2>/dev/null || true
-              ls "pkg/$name"
-              ls "pkg/$name"/*.dll >/dev/null 2>&1 || \
-                echo "::warning::no onnxruntime DLLs found — package relies on ort runtime download"
+              export PKGDIR="pkg/$name"
+              powershell -NoProfile -Command '
+                $hits = @($env:LOCALAPPDATA, $env:USERPROFILE, $env:GITHUB_WORKSPACE) |
+                  Where-Object { $_ } |
+                  ForEach-Object { Get-ChildItem -Path $_ -Recurse -Depth 7 -Filter "onnxruntime*.dll" -ErrorAction SilentlyContinue };
+                foreach ($f in $hits) { Copy-Item $f.FullName $env:PKGDIR }
+                Get-ChildItem $env:PKGDIR -Name
+                if (-not $hits) { Write-Host "::warning::no onnxruntime DLLs found — package relies on ort runtime download" }
+              '
             fi
             (cd pkg && 7z a "../dist/$name.zip" "$name")
             # Get-FileHash emits just the digest — certutil prints a
