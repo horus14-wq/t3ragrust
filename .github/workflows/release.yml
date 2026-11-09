@@ -86,24 +86,29 @@ jobs:
           mkdir -p dist
           if [ "${{ runner.os }}" = "Windows" ]; then
             mkdir -p "pkg/$name" && cp target/release/t3rag.exe "pkg/$name/"
-            # EP flavors: Windows resolves provider DLLs next to the exe —
-            # ship them inside the package (found in the ort dist cache
-            # under LOCALAPPDATA). cygpath normalizes C:\... so cp sees
-            # POSIX paths; -exec avoids xargs eating the backslashes.
+            # EP flavors: ship every onnxruntime*.dll the ort build
+            # downloaded into its pyke cache — base runtime + flavor
+            # providers — so the zip is fully self-contained. cygpath
+            # normalizes C:\... so cp sees POSIX paths; -exec avoids
+            # xargs eating backslashes. directml ships no separate
+            # provider DLLs (provider is built into onnxruntime.dll).
             if [ -n "${{ matrix.features }}" ]; then
-              dirs=("$HOME/.cache/ort.pyke.io")
-              [ -n "${LOCALAPPDATA:-}" ] && dirs+=("$(cygpath -u "$LOCALAPPDATA")/ort.pyke.io")
-              for d in "${dirs[@]}"; do
-                [ -d "$d" ] && find "$d" \( -name 'onnxruntime_providers_*.dll' -o -name 'onnxruntime.dll' \) \
-                  -exec cp {} "pkg/$name/" \;
+              for base in "$HOME/.cache" "${LOCALAPPDATA:-}"; do
+                [ -n "$base" ] || continue
+                d="$(cygpath -u "$base" 2>/dev/null || echo "$base")/ort.pyke.io"
+                [ -d "$d" ] || continue
+                find "$d" -type f -name 'onnxruntime*.dll' -exec cp {} "pkg/$name/" \;
               done
               ls "pkg/$name"
+              ls "pkg/$name"/*.dll >/dev/null 2>&1 || \
+                echo "::warning::no onnxruntime DLLs found — package relies on ort runtime download"
             fi
-            7z a "dist/$name.zip" "pkg/$name"
+            (cd pkg && 7z a "../dist/$name.zip" "$name")
             # Get-FileHash emits just the digest — certutil prints a
             # success footer after the hash, which `tail -1` kept (GH#2).
+            # tr -d '\r' keeps the file LF-clean for sha256sum -c.
             (cd dist && powershell -NoProfile -Command \
-              "(Get-FileHash -Algorithm SHA256 '$name.zip').Hash.ToLower()" > "$name.zip.sha256")
+              "(Get-FileHash -Algorithm SHA256 '$name.zip').Hash.ToLower()" | tr -d '\r' > "$name.zip.sha256")
           else
             mkdir -p "pkg/$name" && cp target/release/t3rag "pkg/$name/"
             # EP flavors: ship the dlopen'd provider .so files ($ORIGIN

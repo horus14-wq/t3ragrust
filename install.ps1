@@ -34,10 +34,15 @@ try {
     if ($want -ne $got) { throw "checksum mismatch (want $want, got $got)" }
 
     Expand-Archive $zip -DestinationPath $tmp
+    # Older zips nest the payload under pkg\ or dist\ — locate the dir
+    # holding t3rag.exe and copy its whole contents (exe + provider
+    # DLLs, which EP flavors ship alongside the binary).
+    $pkgDir = Get-ChildItem -Recurse -Directory $tmp |
+        Where-Object { Test-Path (Join-Path $_.FullName 't3rag.exe') } |
+        Select-Object -First 1
+    if (-not $pkgDir) { throw 'no t3rag.exe found in package' }
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-    # Copy the whole package dir — EP flavors also ship the provider
-    # DLLs (onnxruntime_providers_*.dll) the exe loads from its own dir.
-    Copy-Item (Join-Path $tmp "$name\*") -Destination $Dir -Force
+    Copy-Item (Join-Path $pkgDir.FullName '*') -Destination $Dir -Force
     Write-Host "installed $Dir\t3rag.exe ($Ep, $Target)"
     & (Join-Path $Dir 't3rag.exe') doctor
 } finally {
