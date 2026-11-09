@@ -87,10 +87,17 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             mkdir -p "pkg/$name" && cp target/release/t3rag.exe "pkg/$name/"
             # EP flavors: Windows resolves provider DLLs next to the exe —
-            # ship them inside the package (found in the ort dist cache).
+            # ship them inside the package (found in the ort dist cache
+            # under LOCALAPPDATA). cygpath normalizes C:\... so cp sees
+            # POSIX paths; -exec avoids xargs eating the backslashes.
             if [ -n "${{ matrix.features }}" ]; then
-              find "$HOME" "$LOCALAPPDATA" -name 'onnxruntime_providers_*.dll' -o -name 'onnxruntime.dll' 2>/dev/null \
-                | sort -u | xargs -r -I{} cp {} "pkg/$name/"
+              dirs=("$HOME/.cache/ort.pyke.io")
+              [ -n "${LOCALAPPDATA:-}" ] && dirs+=("$(cygpath -u "$LOCALAPPDATA")/ort.pyke.io")
+              for d in "${dirs[@]}"; do
+                [ -d "$d" ] && find "$d" \( -name 'onnxruntime_providers_*.dll' -o -name 'onnxruntime.dll' \) \
+                  -exec cp {} "pkg/$name/" \;
+              done
+              ls "pkg/$name"
             fi
             7z a "dist/$name.zip" "pkg/$name"
             # Get-FileHash emits just the digest — certutil prints a
