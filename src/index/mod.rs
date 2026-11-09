@@ -615,7 +615,7 @@ mod rewrite_tests {
         // Embedded ids live in raw.f32 v2 records — the same set that
         // got bm25 docs in the original build.
         let raw = std::fs::read(dir.join("vectors.raw.f32")).unwrap();
-        let (nvec, stride, has_id) = crate::index::dense::raw_layout(&raw, 1024).unwrap();
+        let (nvec, stride, _has_id) = crate::index::dense::raw_layout(&raw, 1024).unwrap();
         let mut embedded = std::collections::HashSet::with_capacity(nvec);
         for i in 0..nvec {
             let rec = &raw[16 + i * stride..];
