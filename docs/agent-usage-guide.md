@@ -48,6 +48,16 @@ t3rag show --corpus mytraces 42
 Useful housekeeping: `t3rag list`, `t3rag stats`, `t3rag doctor`,
 `t3rag models` (embedding-model registry), `t3rag capabilities`.
 
+JSONL ingest needs any one text field: `text` | `output` | `content` |
+`passage` | `document` (`question`/`title`/`source` optional) — generic
+document dumps index fine, not just T3 trace records.
+
+Embedding models: `--model` accepts any `owner/name` HF repo. The
+registry carries per-family instructions + pooling (last-token for
+Qwen3, CLS for BGE, masked-mean for e5/GTE/jina); unregistered repos
+get generic defaults, override with `T3RAG_POOLING=last|mean|cls`.
+The query-side instruction is `--instruction` / `T3RAG_INSTRUCTION`.
+
 ---
 
 ## 3. The agent loop (recommended workflow)

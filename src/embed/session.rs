@@ -10,7 +10,7 @@ use ort::value::{Tensor, TensorElementType, ValueType};
 use tokenizers::{PaddingParams, Tokenizer, TruncationParams};
 use tracing::{info, warn};
 
-use super::{ModelSpec, MAX_EMBED_TOKENS};
+use super::{ModelSpec, Pooling, MAX_EMBED_TOKENS};
 use crate::cli::Ep;
 
 /// Map the `--ep` choice to a list of execution providers. `auto` registers
@@ -136,6 +136,9 @@ pub struct Embedder {
     /// `past_key_values.*` input names + declared shapes on merged KV-cache
     /// ONNX exports; fed zero-length cache tensors at run time.
     kv_inputs: Vec<(String, Vec<i64>, TensorElementType)>,
+    /// Sequence pooling the model's registry row declares — last-token for
+    /// Qwen3-family, mean/cls for BERT-family embedders.
+    pooling: Pooling,
 }
 
 impl Embedder {
@@ -210,9 +213,17 @@ impl Embedder {
                 ..Default::default()
             }))
             .map_err(|e| anyhow::anyhow!("set truncation: {e}"))?;
+        // Pad config is family-specific: BERT exports pad "[PAD]"=0 and
+        // XLM-R "<pad>"=1; the Qwen3 default (PAD_ID) covers everything
+        // else. Read the id the model's own tokenizer defines (same fix
+        // as the reranker pad-id bug).
+        let (pad_id, pad_token) = ["[PAD]", "<pad>"]
+            .into_iter()
+            .find_map(|t| tokenizer.token_to_id(t).map(|id| (id, t)))
+            .unwrap_or((PAD_ID, "[PAD]"));
         tokenizer.with_padding(Some(PaddingParams {
-            pad_id: PAD_ID,
-            pad_token: "[PAD]".into(),
+            pad_id,
+            pad_token: pad_token.into(),
             ..Default::default()
         }));
 
@@ -224,6 +235,7 @@ impl Embedder {
             passage_instruction: spec.passage_instruction.clone(),
             declared_inputs,
             kv_inputs,
+            pooling: spec.pooling,
         };
         // Probe dims with a trivial forward pass (also serves as warmup).
         let probe = emb.forward_batch(&["t3rag warmup"])?;
@@ -368,14 +380,37 @@ impl Embedder {
 
         let mut out = Vec::with_capacity(batch);
         for (i, enc) in encodings.iter().enumerate() {
-            // Last non-pad position = last-token pooling index.
-            let last = enc
-                .get_attention_mask()
-                .iter()
-                .rposition(|&m| m == 1)
-                .unwrap_or(0);
-            let start = (i * seq + last) * dims;
-            let mut v = data[start..start + dims].to_vec();
+            let attn = enc.get_attention_mask();
+            let row = |pos: usize| (i * seq + pos) * dims;
+            let mut v = match self.pooling {
+                // Last non-pad position = last-token pooling index.
+                Pooling::LastToken => {
+                    let last = attn.iter().rposition(|&m| m == 1).unwrap_or(0);
+                    data[row(last)..row(last) + dims].to_vec()
+                }
+                // CLS-token pooling: hidden state at position 0.
+                Pooling::Cls => data[row(0)..row(0) + dims].to_vec(),
+                // Mask-weighted mean over all token hidden states.
+                Pooling::Mean => {
+                    let mut acc = vec![0f32; dims];
+                    let mut n = 0f32;
+                    for (pos, &m) in attn.iter().enumerate() {
+                        if m == 1 {
+                            let start = row(pos);
+                            for (a, &x) in acc.iter_mut().zip(&data[start..start + dims]) {
+                                *a += x;
+                            }
+                            n += 1.0;
+                        }
+                    }
+                    if n > 0.0 {
+                        for a in acc.iter_mut() {
+                            *a /= n;
+                        }
+                    }
+                    acc
+                }
+            };
             l2_normalize(&mut v);
             out.push(v);
         }

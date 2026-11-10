@@ -24,6 +24,21 @@ pub const ONNX_FILE_CANDIDATES: [&str; 5] = [
 /// `model.onnx` + `model.onnx_data` at the repo ROOT, no `onnx/` dir).
 pub const ONNX_ROOT_FILE_CANDIDATES: [&str; 1] = ["model.onnx"];
 
+/// Pooling over token-level hidden states to produce the sequence vector.
+/// Qwen3-family embedders are last-token pooled; BERT-family embedders
+/// (BGE/e5/GTE/jina) are mean-pooled over the attention mask. Getting this
+/// wrong silently produces garbage embeddings, so it is per-repo registry
+/// data, never a global default applied to unknown models.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pooling {
+    /// Take the hidden state at the last non-pad token (Qwen3-family).
+    LastToken,
+    /// Mask-weighted mean over all token hidden states (BERT-family).
+    Mean,
+    /// Take the hidden state at position 0 (CLS-token embedders).
+    Cls,
+}
+
 /// One registry row: known repo → retrieval behavior (public for `t3rag models`).
 pub struct RegistryEntry {
     /// HF repo id this row describes.
@@ -34,6 +49,8 @@ pub struct RegistryEntry {
     pub passage_instruction: &'static str,
     /// Expected embedding dimension.
     pub dims: usize,
+    /// Sequence pooling the export expects (see [`Pooling`]).
+    pub pooling: Pooling,
     /// ONNX file candidates to probe inside the repo.
     pub onnx_files: &'static [&'static str],
 }
@@ -48,6 +65,7 @@ pub const REGISTRY: &[RegistryEntry] = &[
         instruction: super::DEFAULT_QUERY_INSTRUCTION,
         passage_instruction: "",
         dims: 1024,
+        pooling: Pooling::LastToken,
         onnx_files: &ONNX_FILE_CANDIDATES,
     },
     // Bigger Qwen3 embedders ship fp32 external-data exports only (root
@@ -59,6 +77,7 @@ pub const REGISTRY: &[RegistryEntry] = &[
         instruction: super::DEFAULT_QUERY_INSTRUCTION,
         passage_instruction: "",
         dims: 2560,
+        pooling: Pooling::LastToken,
         onnx_files: &ONNX_ROOT_FILE_CANDIDATES,
     },
     RegistryEntry {
@@ -66,6 +85,7 @@ pub const REGISTRY: &[RegistryEntry] = &[
         instruction: super::DEFAULT_QUERY_INSTRUCTION,
         passage_instruction: "",
         dims: 4096,
+        pooling: Pooling::LastToken,
         onnx_files: &ONNX_ROOT_FILE_CANDIDATES,
     },
     // bge-m3: multilingual ~568M embedder; query prefix per model card.
@@ -74,6 +94,58 @@ pub const REGISTRY: &[RegistryEntry] = &[
         instruction: "Represent this sentence for searching relevant passages: ",
         passage_instruction: "",
         dims: 1024,
+        pooling: Pooling::Cls,
+        onnx_files: &ONNX_FILE_CANDIDATES,
+    },
+    // BERT-family mainstream embedders (Xenova ONNX exports — all ship
+    // onnx/model_uint8.onnx so the standard candidates apply). These are
+    // mean-pooled; instruct variants carry their query/passage prefixes.
+    RegistryEntry {
+        repo: "Xenova/bge-small-en-v1.5",
+        instruction: "Represent this sentence for searching relevant passages: ",
+        passage_instruction: "",
+        dims: 384,
+        pooling: Pooling::Cls,
+        onnx_files: &ONNX_FILE_CANDIDATES,
+    },
+    RegistryEntry {
+        repo: "Xenova/bge-base-en-v1.5",
+        instruction: "Represent this sentence for searching relevant passages: ",
+        passage_instruction: "",
+        dims: 768,
+        pooling: Pooling::Cls,
+        onnx_files: &ONNX_FILE_CANDIDATES,
+    },
+    RegistryEntry {
+        repo: "Xenova/multilingual-e5-small",
+        instruction: "query: ",
+        passage_instruction: "passage: ",
+        dims: 384,
+        pooling: Pooling::Mean,
+        onnx_files: &ONNX_FILE_CANDIDATES,
+    },
+    RegistryEntry {
+        repo: "Xenova/multilingual-e5-base",
+        instruction: "query: ",
+        passage_instruction: "passage: ",
+        dims: 768,
+        pooling: Pooling::Mean,
+        onnx_files: &ONNX_FILE_CANDIDATES,
+    },
+    RegistryEntry {
+        repo: "Xenova/gte-small",
+        instruction: "",
+        passage_instruction: "",
+        dims: 384,
+        pooling: Pooling::Mean,
+        onnx_files: &ONNX_FILE_CANDIDATES,
+    },
+    RegistryEntry {
+        repo: "Xenova/jina-embeddings-v2-base-en",
+        instruction: "",
+        passage_instruction: "",
+        dims: 768,
+        pooling: Pooling::Mean,
         onnx_files: &ONNX_FILE_CANDIDATES,
     },
 ];
@@ -93,6 +165,9 @@ pub struct ModelSpec {
     pub instruction: String,
     /// Instruction prefix prepended to passages (empty = none).
     pub passage_instruction: String,
+    /// Sequence pooling the export expects (registry-provided;
+    /// `LastToken` for unknown repos — Qwen3-family is today's default).
+    pub pooling: Pooling,
 }
 
 impl ModelSpec {
@@ -106,6 +181,7 @@ impl ModelSpec {
             dims: 1024,
             instruction: super::DEFAULT_QUERY_INSTRUCTION.into(),
             passage_instruction: String::new(),
+            pooling: Pooling::LastToken,
         }
     }
 
@@ -121,6 +197,7 @@ impl ModelSpec {
                 dims: e.dims,
                 instruction: e.instruction.to_string(),
                 passage_instruction: e.passage_instruction.to_string(),
+                pooling: e.pooling,
             };
         }
         Self {
@@ -130,6 +207,18 @@ impl ModelSpec {
             dims: 0,
             instruction: String::new(),
             passage_instruction: String::new(),
+            // T3RAG_POOLING=last|mean|cls overrides for unregistered repos —
+            // last-token matches the current default family; mean/cls unlock
+            // BERT-family exports the registry hasn't grown yet.
+            pooling: std::env::var("T3RAG_POOLING")
+                .ok()
+                .and_then(|v| match v.as_str() {
+                    "last" | "last_token" => Some(Pooling::LastToken),
+                    "mean" => Some(Pooling::Mean),
+                    "cls" => Some(Pooling::Cls),
+                    _ => None,
+                })
+                .unwrap_or(Pooling::LastToken),
         }
     }
 }

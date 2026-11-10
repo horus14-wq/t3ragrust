@@ -112,6 +112,9 @@ t3rag pull --repo horus14-wq/fable5-v2-coding-t3-indexes --subdir struct
 
 # or index your own (JSONL / dir of .md|.txt / parquet):
 t3rag index --input traces.jsonl --name traces
+#   JSONL needs any one of: text | output | content | passage | document
+#   (question / title / source are optional metadata - so generic
+#   document dumps work, not just T3 trace records)
 ```
 
 **Use it:**
@@ -164,7 +167,12 @@ JSONL / .md dir / Parquet
 - **Embedder**: local ONNX via `ort` - default
   `onnx-community/Qwen3-Embedding-0.6B-ONNX` (1024-dim, Matryoshka
   truncation to `--dims 32..1024`). `--model` / `T3RAG_MODEL` swaps in any
-  registered repo; `t3rag models` lists them.
+  `owner/name` HF repo. The registry (`t3rag models`) carries per-family
+  instruction prefixes and pooling - last-token (Qwen3), CLS (BGE), or
+  masked-mean (e5/GTE/jina): bge-m3, bge-small/base-en-v1.5,
+  multilingual-e5-small/base, gte-small, jina-embeddings-v2-base-en.
+  Unregistered repos get honest generic defaults; `T3RAG_POOLING=last|mean|cls`
+  overrides.
 - **Dense**: usearch HNSW (`--quantization i8|bf16|f16|fp32`) plus
   `vectors.raw.f32` raw fp32 kept for `--exact` recall audits.
 - **Lexical**: tantivy BM25 (`title`/`question` TEXT, `source` STRING).

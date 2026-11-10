@@ -13,7 +13,7 @@ mod model;
 mod pool;
 pub(crate) mod session;
 
-pub use model::{ModelSpec, REGISTRY};
+pub use model::{ModelSpec, Pooling, REGISTRY};
 pub use pool::EmbedderPool;
 pub use session::Embedder;
 

@@ -18,6 +18,11 @@ struct Line {
     /// `output` is the passage field used by the T3 transform pipeline
     /// (t3data `f5_v2_t3_*.jsonl`); `text` wins when both are present.
     output: Option<String>,
+    /// General-purpose aliases — same auto-detect as parquet ingest
+    /// (`content`/`passage` columns); makes generic JSONL dumps ingestible.
+    content: Option<String>,
+    passage: Option<String>,
+    document: Option<String>,
     title: Option<String>,
     question: Option<String>,
     source: Option<String>,
@@ -56,7 +61,13 @@ pub fn open(path: &Path) -> Result<(RawIter, SkipStats)> {
                     }
                     st.record_read(trimmed.len() as u64);
                     match serde_json::from_str::<Line>(trimmed) {
-                        Ok(rec) => match rec.text.or(rec.output) {
+                        Ok(rec) => match rec
+                            .text
+                            .or(rec.output)
+                            .or(rec.content)
+                            .or(rec.passage)
+                            .or(rec.document)
+                        {
                             Some(text) => Some(Ok(RawPassage {
                                 text,
                                 title: rec.title,
